@@ -58,7 +58,11 @@ func Migrate(db *sql.DB) error {
 		return fmt.Errorf("set goose dialect: %w", err)
 	}
 
-	if err := goose.Up(db, "migrations"); err != nil {
+	// WithAllowMissing: fork-only migrations are numbered 90001+ so they can never collide
+	// with upstream's sequence. Once one is applied, an upstream migration released later
+	// (e.g. 00071) sorts below the current version; goose would refuse it as "missing"
+	// without this, instead of applying it.
+	if err := goose.Up(db, "migrations", goose.WithAllowMissing()); err != nil {
 		return fmt.Errorf("run migrations: %w", err)
 	}
 
