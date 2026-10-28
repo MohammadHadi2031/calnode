@@ -54,6 +54,16 @@ func BuildICS(d BookingData, method string) []byte {
 	}
 	if d.OrganizerEmail != "" && !d.ICSWithoutAttendee {
 		writeICSLine(&b, "ATTENDEE;CN="+escapeICSParam(d.OrganizerName)+";RSVP=TRUE:mailto:"+d.OrganizerEmail)
+		for _, g := range d.Guests {
+			if g.Email == "" || strings.EqualFold(g.Email, d.OrganizerEmail) {
+				continue
+			}
+			name := g.Name
+			if name == "" {
+				name = g.Email
+			}
+			writeICSLine(&b, "ATTENDEE;CN="+escapeICSParam(name)+";RSVP=TRUE:mailto:"+g.Email)
+		}
 	}
 	writeICSLine(&b, "STATUS:"+status)
 	writeICSLine(&b, "END:VEVENT")

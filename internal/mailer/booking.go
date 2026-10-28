@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 	"text/template"
 	"time"
 
@@ -14,14 +15,17 @@ import (
 
 // BookingData carries all the information needed to render booking emails.
 type BookingData struct {
-	BookingID          string
-	EventTypeName      string
-	EventTypeSlug      string
-	HostName           string
-	HostEmail          string
-	OrganizerName      string
-	OrganizerEmail     string
-	OrganizerTimezone  string
+	BookingID         string
+	EventTypeName     string
+	EventTypeSlug     string
+	HostName          string
+	HostEmail         string
+	OrganizerName     string
+	OrganizerEmail    string
+	OrganizerTimezone string
+	// Guests are the booking's other invitees, listed as ATTENDEEs on the .ics so every
+	// copy describes the same meeting. ForGuest builds a guest's own copy.
+	Guests             []Invitee
 	StartAt            time.Time // UTC (new time for reschedule emails)
 	EndAt              time.Time
 	PreviousStartAt    time.Time // non-zero only for reschedule emails
@@ -581,3 +585,30 @@ var reminderOrgTmpl = template.Must(template.New("reminder-org").Parse(
 {{end}}
 — {{.Brand}}
 `))
+
+// Invitee is a booking guest as the mailer sees it.
+type Invitee struct {
+	Name  string
+	Email string
+}
+
+// ForGuest returns the attendee-email data addressed to guest g instead of the booker:
+// greeted by their name, without the booker's manage link (guests cannot reschedule or
+// cancel), and with the booker moved into the .ics attendee list in their place.
+func (d BookingData) ForGuest(g Invitee) BookingData {
+	gd := d
+	others := []Invitee{{Name: d.OrganizerName, Email: d.OrganizerEmail}}
+	for _, o := range d.Guests {
+		if !strings.EqualFold(o.Email, g.Email) {
+			others = append(others, o)
+		}
+	}
+	gd.Guests = others
+	gd.OrganizerName, gd.OrganizerEmail = g.Name, g.Email
+	if gd.OrganizerName == "" {
+		gd.OrganizerName = g.Email
+	}
+	gd.ManageURL = ""
+	gd.HideManageLink = true
+	return gd
+}

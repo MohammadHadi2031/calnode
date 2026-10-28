@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildICS_request(t *testing.T) {
@@ -169,5 +170,35 @@ func TestBuildRaw_multipartWithICS(t *testing.T) {
 	}
 	if !strings.Contains(raw, "body text") {
 		t.Error("missing text body part")
+	}
+}
+
+// Every copy of a guest-carrying invite describes the same meeting: the booker and all
+// guests are ATTENDEEs, and a guest's own copy carries no manage link.
+func TestBuildICS_listsGuestsAndForGuestSwapsRecipient(t *testing.T) {
+	d := BookingData{
+		BookingID: "b1", EventTypeName: "Intro", HostName: "Host", HostEmail: "host@example.com",
+		OrganizerName: "Alice", OrganizerEmail: "alice@example.com",
+		Guests:    []Invitee{{Email: "bob@example.com"}, {Name: "Carol", Email: "carol@example.com"}},
+		StartAt:   time.Date(2026, 6, 1, 9, 0, 0, 0, time.UTC),
+		EndAt:     time.Date(2026, 6, 1, 9, 30, 0, 0, time.UTC),
+		ManageURL: "https://x/manage/tok",
+	}
+	ics := string(BuildICS(d, "REQUEST"))
+	for _, want := range []string{"mailto:alice@example.com", "mailto:bob@example.com", "mailto:carol@example.com"} {
+		if !strings.Contains(ics, want) {
+			t.Errorf("ICS missing ATTENDEE %s:\n%s", want, ics)
+		}
+	}
+	g := d.ForGuest(Invitee{Email: "bob@example.com"})
+	if g.OrganizerEmail != "bob@example.com" || g.ManageURL != "" || !g.HideManageLink {
+		t.Errorf("guest copy = %+v; want addressed to bob, no manage link", g)
+	}
+	gics := string(BuildICS(g, "REQUEST"))
+	if strings.Count(gics, "mailto:bob@example.com") != 1 || !strings.Contains(gics, "mailto:alice@example.com") {
+		t.Errorf("guest ICS should list bob once and keep alice:\n%s", gics)
+	}
+	if strings.Contains(gics, "manage/tok") {
+		t.Error("guest ICS leaks the booker's manage link")
 	}
 }
