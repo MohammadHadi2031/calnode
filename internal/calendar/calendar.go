@@ -32,6 +32,11 @@ type CreateEventParams struct {
 	// TimeZone is the IANA zone the event is written in ("" = UTC). Google renders its
 	// invitation email's times in it for recipients who have no Google calendar setting.
 	TimeZone string
+	// UseAnyAccount lets the provider write to one of the user's connected accounts that
+	// is NOT their destination when they have no destination with this provider. Set by
+	// Service.CreateEventVia, for the meeting host whose Meet/Teams-capable account is not
+	// the one their bookings normally land in (e.g. destination Outlook, Meet requested).
+	UseAnyAccount bool
 }
 
 // Invitee is one attendee on a provider event.
@@ -467,4 +472,72 @@ func (s *Service) CancelEvent(ctx context.Context, userID, calendarID, eventID, 
 		return pr.CancelEvent(ctx, userID, calendarID, eventID)
 	}
 	return nil
+}
+
+// MeetingProvider returns which of userID's connected providers can mint the online
+// meeting for locType - "google" for google_meet (any Google account), "microsoft" for
+// teams (a work/school account; personal accounts cannot create Teams-for-Business
+// meetings) - preferring the destination account. "" when none can, or for any other
+// location type. Unlike CanAutoGenerate this looks past the destination: a host who
+// writes bookings to Outlook but also connected Google can still mint a Meet link.
+func (s *Service) MeetingProvider(ctx context.Context, userID, locType string) (string, error) {
+	var want string
+	switch locType {
+	case "google_meet":
+		want = "google"
+	case "teams":
+		want = "microsoft"
+	default:
+		return "", nil
+	}
+	if s.providers[want] == nil {
+		return "", nil
+	}
+	q := `SELECT 1 FROM calendar_connections WHERE user_id = ? AND provider = ?`
+	if want == "microsoft" {
+		q += ` AND COALESCE(account_kind, '') != 'personal'`
+	}
+	var one int
+	switch err := s.db.QueryRowContext(ctx, q+` LIMIT 1`, userID, want).Scan(&one); err {
+	case nil:
+		return want, nil
+	case sql.ErrNoRows:
+		return "", nil
+	default:
+		return "", err
+	}
+}
+
+// CreateEventVia creates the event through a named provider - its destination calendar
+// if the user's destination is with that provider, otherwise that provider's first
+// connected account (see CreateEventParams.UseAnyAccount). Returns the same values as
+// CreateEvent. Use it where the provider matters more than the destination: minting a
+// Meet or Teams link.
+func (s *Service) CreateEventVia(ctx context.Context, userID, provider string, p CreateEventParams) (string, string, string, string, error) {
+	pr := s.providers[provider]
+	if pr == nil {
+		return s.CreateEvent(ctx, userID, p)
+	}
+	p.UseAnyAccount = true
+	eventID, joinURL, calendarID, err := pr.CreateEvent(ctx, userID, p)
+	if err != nil {
+		return "", "", "", "", err
+	}
+	return eventID, joinURL, calendarID, pr.Name(), nil
+}
+
+// DestinationProvider is the name of the provider userID's bookings are written to, or
+// "" when they have no destination.
+func (s *Service) DestinationProvider(ctx context.Context, userID string) string {
+	if p := s.providerForDestination(ctx, userID); p != nil {
+		return p.Name()
+	}
+	return ""
+}
+
+// ProviderInvitesGuests reports whether the named provider emails an event's guests
+// itself (false for an unknown name).
+func (s *Service) ProviderInvitesGuests(name string) bool {
+	p := s.providers[name]
+	return p != nil && p.InvitesGuests()
 }

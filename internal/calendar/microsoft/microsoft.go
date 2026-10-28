@@ -300,7 +300,8 @@ func (c *Client) httpClient(ctx context.Context, userID string, checkConflicts, 
 	      FROM calendar_connections WHERE user_id = ? AND provider = ?`
 	args := []any{userID, providerName}
 	frag, fragArgs := connstore.WhereClause(checkConflicts, isDestination)
-	q += frag + " LIMIT 1"
+	// Destination first, then work/school accounts (only those can mint Teams).
+	q += frag + " ORDER BY is_destination DESC, (COALESCE(account_kind, '') = 'personal') ASC, created_at ASC LIMIT 1"
 	args = append(args, fragArgs...)
 
 	var accessEnc, refreshEnc, calID, expiryStr, accountEmail string
@@ -483,4 +484,18 @@ func (c *Client) decryptEncoding(ciphertext string, enc *base64.Encoding) ([]byt
 		return nil, fmt.Errorf("microsoft: decrypt: %w", err)
 	}
 	return plain, nil
+}
+
+// writeClient returns the client for the user's Microsoft destination account, falling
+// back - when anyAccount is set and they have none - to their first connected (work, if
+// any) Microsoft account. dest reports whether the destination was used: only then does
+// a picked sub-calendar apply. See the Google provider's writeClient for why updates and
+// cancels always fall back.
+func (c *Client) writeClient(ctx context.Context, userID string, anyAccount bool) (hc *http.Client, dest bool, err error) {
+	hc, err = c.httpClient(ctx, userID, -1, 1)
+	if err != nil || hc != nil || !anyAccount {
+		return hc, hc != nil, err
+	}
+	hc, err = c.httpClient(ctx, userID, -1, -1)
+	return hc, false, err
 }

@@ -81,7 +81,7 @@ func (r calEventResp) meetLink() string {
 // p.AddMeet is set, the generated Google Meet URL. Returns ("", "", nil) if the
 // user has no is_destination connection.
 func (c *Client) CreateEvent(ctx context.Context, userID string, p calendar.CreateEventParams) (string, string, string, error) {
-	hc, calID, err := c.DestinationClient(ctx, userID)
+	hc, calID, err := c.writeClient(ctx, userID, p.UseAnyAccount)
 	if err != nil || hc == nil {
 		return "", "", "", err
 	}
@@ -158,7 +158,7 @@ func (c *Client) UpdateEvent(ctx context.Context, userID, calendarID, eventID st
 	if eventID == "" {
 		return nil
 	}
-	hc, calID, err := c.DestinationClient(ctx, userID)
+	hc, calID, err := c.writeClient(ctx, userID, true)
 	if err != nil || hc == nil {
 		return err
 	}
@@ -209,7 +209,7 @@ func (c *Client) CancelEvent(ctx context.Context, userID, calendarID, eventID st
 	if eventID == "" {
 		return nil
 	}
-	hc, calID, err := c.DestinationClient(ctx, userID)
+	hc, calID, err := c.writeClient(ctx, userID, true)
 	if err != nil || hc == nil {
 		return err
 	}

@@ -64,7 +64,7 @@ type graphEventResp struct {
 // ID and, when p.AddMeet is set, the Teams join URL. Graph emails attendees its own
 // invite. Returns ("", "", nil) if the user has no is_destination connection.
 func (c *Client) CreateEvent(ctx context.Context, userID string, p calendar.CreateEventParams) (string, string, string, error) {
-	hc, err := c.httpClient(ctx, userID, -1, 1)
+	hc, toDestination, err := c.writeClient(ctx, userID, p.UseAnyAccount)
 	if err != nil || hc == nil {
 		return "", "", "", err
 	}
@@ -109,9 +109,11 @@ func (c *Client) CreateEvent(ctx context.Context, userID string, p calendar.Crea
 	// cancel stay on /me/events/{id}, which Graph resolves across all of the user's
 	// calendars, so only creation needs to be calendar-scoped.
 	createURL := c.apiBase + "/me/events"
-	destCal, err := c.destinationCalendarID(ctx, userID)
-	if err != nil {
-		return "", "", "", err
+	destCal := ""
+	if toDestination {
+		if destCal, err = c.destinationCalendarID(ctx, userID); err != nil {
+			return "", "", "", err
+		}
 	}
 	if destCal != "" {
 		createURL = c.apiBase + "/me/calendars/" + url.PathEscape(destCal) + "/events"
@@ -153,7 +155,7 @@ func (c *Client) UpdateEvent(ctx context.Context, userID, calendarID, eventID st
 	if eventID == "" {
 		return nil
 	}
-	hc, err := c.httpClient(ctx, userID, -1, 1)
+	hc, _, err := c.writeClient(ctx, userID, true)
 	if err != nil || hc == nil {
 		return err
 	}
@@ -194,7 +196,7 @@ func (c *Client) CancelEvent(ctx context.Context, userID, calendarID, eventID st
 	if eventID == "" {
 		return nil
 	}
-	hc, err := c.httpClient(ctx, userID, -1, 1)
+	hc, _, err := c.writeClient(ctx, userID, true)
 	if err != nil || hc == nil {
 		return err
 	}

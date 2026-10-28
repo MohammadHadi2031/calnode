@@ -190,7 +190,7 @@ func (c *Client) httpClient(ctx context.Context, userID string, checkConflicts, 
 	      WHERE user_id = ? AND provider = 'google'`
 	args := []any{userID}
 	frag, fragArgs := connstore.WhereClause(checkConflicts, isDestination)
-	q += frag + " LIMIT 1"
+	q += frag + " ORDER BY is_destination DESC, created_at ASC LIMIT 1"
 	args = append(args, fragArgs...)
 
 	var accessEnc, refreshEnc, calID, expiryStr, accountEmail string
@@ -265,6 +265,19 @@ func (c *Client) freeBusyConnections(ctx context.Context, userID string) ([]fbCo
 		conns = append(conns, fbConn{hc: hc, calIDs: calIDs})
 	}
 	return conns, nil
+}
+
+// writeClient is DestinationClient, falling back - when anyAccount is set and the user
+// has no Google destination - to their first connected Google account's own calendar.
+// Updates and cancels always pass anyAccount: the event's provider was stamped when it
+// was written, so a Google event must be acted on through a Google account even after
+// the user's destination moved elsewhere (or was never Google; see CreateEventVia).
+func (c *Client) writeClient(ctx context.Context, userID string, anyAccount bool) (*http.Client, string, error) {
+	hc, calID, err := c.DestinationClient(ctx, userID)
+	if err != nil || hc != nil || !anyAccount {
+		return hc, calID, err
+	}
+	return c.httpClient(ctx, userID, -1, -1)
 }
 
 // DestinationClient returns an authorized http.Client for writing events

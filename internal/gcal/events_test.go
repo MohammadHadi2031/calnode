@@ -386,3 +386,27 @@ func TestUpdateEvent_keepsTheEventZone(t *testing.T) {
 		t.Errorf("start.dateTime = %v", body["start"]["dateTime"])
 	}
 }
+
+// A host whose destination is another provider can still have a Meet event written to
+// their Google account when the caller asks for it (CreateEventVia), and only then.
+func TestCreateEvent_anyAccountFallsBackToNonDestinationGoogle(t *testing.T) {
+	srv, gotReq := mockCreateEventServer(t, "ev-any", http.StatusOK)
+	c := newTestClient(t)
+	c.apiBase = srv.URL
+	saveDestinationConnection(t, c, "user-1", "primary")
+	if _, err := c.db.Exec(`UPDATE calendar_connections SET is_destination = 0 WHERE user_id = 'user-1'`); err != nil {
+		t.Fatal(err)
+	}
+	p := calendar.CreateEventParams{Summary: "Intro", Start: time.Now(), End: time.Now().Add(time.Hour), AddMeet: true}
+	if id, _, _, err := c.CreateEvent(context.Background(), "user-1", p); err != nil || id != "" {
+		t.Fatalf("without UseAnyAccount: id=%q err=%v; want nothing written", id, err)
+	}
+	p.UseAnyAccount = true
+	id, link, _, err := c.CreateEvent(context.Background(), "user-1", p)
+	if err != nil || id != "ev-any" {
+		t.Fatalf("with UseAnyAccount: id=%q err=%v; want ev-any", id, err)
+	}
+	if link == "" || gotReq.ConferenceData == nil {
+		t.Errorf("Meet not requested/returned: link=%q", link)
+	}
+}
