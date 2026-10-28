@@ -74,7 +74,8 @@ func TestDispatch_stalledMailDoesNotStarveCalendarOrReminders(t *testing.T) {
 	var events, reminders, flagged int
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		_ = f.h.db.QueryRow(`SELECT COUNT(*) FROM booking_hosts WHERE COALESCE(external_event_id, '') != ''`).Scan(&events)
+		// Fork: a multi-host booking gets one shared event; the other seat is invited to it.
+		_ = f.h.db.QueryRow(`SELECT COUNT(*) FROM booking_hosts WHERE COALESCE(external_event_id, '') != '' OR invited_via_organizer = 1`).Scan(&events)
 		_ = f.h.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE type = 'reminder.send'`).Scan(&reminders)
 		_ = f.h.db.QueryRow(`SELECT COUNT(*) FROM bookings WHERE confirm_failed = 1`).Scan(&flagged)
 		if events == 2 && reminders > 0 && flagged == 1 {
@@ -82,6 +83,6 @@ func TestDispatch_stalledMailDoesNotStarveCalendarOrReminders(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Fatalf("host events = %d (want 2), reminder jobs = %d (want > 0), confirm_failed bookings = %d (want 1)",
+	t.Fatalf("hosts with an event or an invite = %d (want 2), reminder jobs = %d (want > 0), confirm_failed bookings = %d (want 1)",
 		events, reminders, flagged)
 }

@@ -605,7 +605,11 @@ func TestDuplicateEventType_handlesEveryEventTypeColumn(t *testing.T) {
 		"subj_reminder": true,
 		"price_cents":   true, "currency": true,
 		"invite_delivery": true,
-		"display_order":   true,
+		// Fork (migration 90001).
+		"max_guests":              true,
+		"allow_conference_choice": true,
+		"invite_timezone":         true,
+		"display_order":           true,
 	}
 	// Deliberately not inherited, with the reason.
 	notInherited := map[string]string{

@@ -512,6 +512,9 @@ type bookableEventType struct {
 	// InviteDelivery is who sends the booker's invite (booking.InviteByCalendar/ByCalnode),
 	// copied onto each booking at creation.
 	InviteDelivery string
+	// Fork (migration 90001): guest cap and whether the booker may pick Meet or Teams.
+	MaxGuests             int
+	AllowConferenceChoice bool
 }
 
 // loadBookableEventType loads an event type by slug for the booking-creation/slot paths.
@@ -527,13 +530,13 @@ func (h *Handler) loadBookableEventType(ctx context.Context, slug string) (*book
 		       location_type, location_value, allow_phone_call, routing_mode, rr_strategy,
 		       buffer_before_minutes, buffer_after_minutes, min_notice_minutes, max_future_days,
 		       is_active, is_public, show_taken_slots, max_active_bookings, price_cents, currency,
-		       invite_delivery
+		       invite_delivery, max_guests, allow_conference_choice
 		FROM event_types WHERE slug = ?`, slug).
 		Scan(&et.ID, &et.UserID, &et.Name, &et.DurationMinutes, &et.SlotIntervalMinutes,
 			&et.LocationType, &et.LocationValue, &et.AllowPhoneCall, &et.RoutingMode, &et.RRStrategy,
 			&et.BufferBeforeMinutes, &et.BufferAfterMinutes, &et.MinNoticeMinutes, &et.MaxFutureDays,
 			&isActive, &isPublic, &showTaken, &et.MaxActiveBookings, &et.PriceCents, &et.Currency,
-			&et.InviteDelivery)
+			&et.InviteDelivery, &et.MaxGuests, &et.AllowConferenceChoice)
 	if err != nil || isActive == 0 || isPublic == 0 {
 		return nil, errEventTypeNotFound
 	}
@@ -756,7 +759,12 @@ func (h *Handler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 		// autofill entry (ignoring autocomplete="off") and fill this invisible field
 		// for real humans, who are then rejected as bots (#33).
 		Honeypot string `json:"hp_extra"`
-		Answers  []struct {
+		// Guests are additional invitee emails (fork; capped by event_types.max_guests).
+		Guests []string `json:"guests"`
+		// Conference is the booker's pick of "google_meet" or "teams", honoured when the
+		// event type offers the choice (allow_conference_choice).
+		Conference string `json:"conference"`
+		Answers    []struct {
 			QuestionID string `json:"question_id"`
 			Value      string `json:"value"`
 		} `json:"answers"`
@@ -874,6 +882,16 @@ func (h *Handler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if len(req.Guests) > maxGuestsCeiling {
+		h.writeError(w, http.StatusBadRequest, loc.Tf("err_too_many_guests", et.MaxGuests))
+		return
+	}
+	guests, err := normalizeGuests(req.Guests, req.Email, et.MaxGuests, loc)
+	if err != nil {
+		h.writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
 	// Validate intake question answers.
 	answers, err := h.validateAnswers(w, r, et.ID, loc, req.Answers)
 	if err != nil {
@@ -885,6 +903,10 @@ func (h *Handler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 	locValue := ""
 	if et.LocationValue != nil {
 		locValue = *et.LocationValue
+	}
+	if !conferenceChoice(et, strings.TrimSpace(req.Conference), &locValue) {
+		h.writeError(w, http.StatusBadRequest, "conference must be google_meet or teams, and offered by this event type")
+		return
 	}
 
 	// Resolve candidate hosts by routing mode: rotation hosts for round-robin,
@@ -950,6 +972,7 @@ func (h *Handler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 			IANATimezone: req.Timezone,
 			Locale:       i18n.Resolve("", req.Language).Code,
 		},
+		Guests:              guests,
 		Answers:             answers,
 		MaxActivePerInvitee: et.MaxActiveBookings,
 		MaxBookingsPerHour:  maxBookingsPerEmailPerHour,
@@ -1102,18 +1125,15 @@ func (h *Handler) hostBookingData(ctx context.Context, base mailer.BookingData, 
 // LiveKit resolve here and mutate b/bData in place; a Meet/Teams link is instead captured
 // later from the calendar event Google/Microsoft actually creates (see
 // createHostEvents), since only the calendar API call itself produces it.
-func (h *Handler) mintMeetingLink(ctx context.Context, b *booking.Booking, in bookingConfirmationInput, bData *mailer.BookingData, hosts []assignedHost) (meetURL string, autoGenMeet bool, livekitHostURL string) {
+func (h *Handler) mintMeetingLink(ctx context.Context, b *booking.Booking, in bookingConfirmationInput, bData *mailer.BookingData, hosts []assignedHost) (meetURL string, meeting meetingPlan, livekitHostURL string) {
 	gc := h.getCal()
 	if in.LocationType == "phone" {
 		meetURL = b.LocationValue
 	}
-	if gc != nil && onlineMeetingLocation(in.LocationType) {
-		if _, primaryProvider, perr := gc.Connected(ctx, primaryHost(hosts).UserID); perr == nil {
-			autoGenMeet = providerMintsPlatform(in.LocationType, primaryProvider)
-		} else {
-			h.logger.Error("booking confirmation: primary host provider lookup", "error", perr, "booking_id", b.ID)
-		}
-	}
+	// Fork: any assigned host able to mint the platform does so (see pickMeetingHost),
+	// not only the primary - and through whichever of their accounts can.
+	meeting = h.pickMeetingHost(ctx, gc, hosts, in.LocationType)
+	autoGenMeet := meeting.hostID != ""
 	// Seed the propagated location with the organizer's manual link when we won't
 	// auto-generate, so the calendar events and emails still carry a join link.
 	if onlineMeetingLocation(in.LocationType) && !autoGenMeet {
@@ -1173,7 +1193,7 @@ func (h *Handler) mintMeetingLink(ctx context.Context, b *booking.Booking, in bo
 			}
 		}
 	}
-	return meetURL, autoGenMeet, livekitHostURL
+	return meetURL, meeting, livekitHostURL
 }
 
 // remintLiveKitLinks re-mints a LiveKit booking's join URLs after a reschedule. The
@@ -1219,40 +1239,46 @@ func hostEventLocation(meetURL, livekitHostURL, attendeeLocationValue string) st
 	return meetURL
 }
 
-// createHostEvents creates a calendar event on each assigned host's connected calendar
-// (Group bookings put several hosts on the meeting; round-robin/Normal has one) and
-// records each event's id. The primary goes first: a Google Meet/Teams link is minted as
-// a side effect of the primary's calendar API call (see mintMeetingLink's doc comment),
-// and it is captured into bData.LocationValue and the booking row so every other host's
-// event, and the emails sent afterwards, carry it. The remaining hosts' events are then
-// written concurrently - one after another, a collective's last hosts could run out of
-// dispatch budget before their turn and be left without an event until the reconciler.
-func (h *Handler) createHostEvents(ctx context.Context, b *booking.Booking, in bookingConfirmationInput, bData *mailer.BookingData, hosts []assignedHost, meetURL string, autoGenMeet bool, livekitHostURL string) {
+// createHostEvents writes the booking's calendar events and reports whether a provider
+// invite reached the booker and guests (providerInvites) and whether that happened
+// through one shared event (shared).
+//
+// Calendar-delivered invites (the default) get ONE event when there is more than one
+// host or a Meet/Teams link to mint: it lives on the organizer host's calendar - the
+// meeting host's minting account when there is one (see pickMeetingHost), else the
+// first host with a destination - and lists the booker, every guest and every other
+// host as attendees. One invite reaches everyone, Google Meet admits all of them without
+// knocking, and nobody gets a second copy from each co-host's calendar. The other seats
+// are marked invited_via_organizer so the reconciler leaves them alone; moving and
+// cancelling the one event updates everyone through the provider.
+//
+// Calnode-delivered invites keep one guestless event per host (blocking each host's own
+// time); the meeting host's is written through their minting account, first, so the
+// link it returns can go on the others' events.
+func (h *Handler) createHostEvents(ctx context.Context, b *booking.Booking, in bookingConfirmationInput, bData *mailer.BookingData, hosts []assignedHost, guests []booking.Attendee, meetURL string, meeting meetingPlan, livekitHostURL, timeZone string) (providerInvites, shared bool) {
 	gc := h.getCal()
 	if gc == nil {
-		return
+		return false, false
 	}
-	create := func(host assignedHost, location string) (link string) {
-		eventID, link, calID, provider, err := gc.CreateEvent(ctx, host.UserID, calendar.CreateEventParams{
-			// The attendee is added as a calendar invitee below, so this text reaches
-			// them via the provider's own native invite (Google/Outlook/CalDAV) —
-			// follows their locale like the confirmation email, not English/host-fixed.
-			Summary:        bData.Tf("calendar_event_summary", in.EventTypeName, in.OrganizerName),
-			Description:    bData.Tf("calendar_event_booking_id", b.ID),
-			Location:       location,
-			Start:          b.StartAt,
-			End:            b.EndAt,
-			OrganizerName:  in.OrganizerName,
-			OrganizerEmail: calendarInvitee(b.InviteDelivery, in.OrganizerEmail),
-			AddMeet:        autoGenMeet && host.IsPrimary,
-		})
+	addMeet := meeting.hostID != ""
+	calendarMode := b.InviteDelivery != booking.InviteByCalnode
+
+	// write creates one seat's event, records it, and captures a minted link.
+	write := func(host assignedHost, via string, p calendar.CreateEventParams) {
+		var eventID, link, calID, provider string
+		var err error
+		if via != "" {
+			eventID, link, calID, provider, err = gc.CreateEventVia(ctx, host.UserID, via, p)
+		} else {
+			eventID, link, calID, provider, err = gc.CreateEvent(ctx, host.UserID, p)
+		}
 		if err != nil {
 			h.logger.Error("create gcal event", "error", err, "booking_id", b.ID, "host", host.UserID)
 			h.nudgeCalendarReconcile() // heal this missing event on a later sweep
-			return ""
+			return
 		}
 		if eventID == "" {
-			return ""
+			return
 		}
 		// Record WHICH calendar too. Reschedule and cancel use it instead of
 		// re-resolving the host's destination, so changing that later cannot orphan
@@ -1270,46 +1296,121 @@ func (h *Handler) createHostEvents(ctx context.Context, b *booking.Booking, in b
 				h.logger.Error("save gcal event id", "error", err, "booking_id", b.ID)
 			}
 		}
-		return link
-	}
-
-	for _, host := range hosts {
-		if !host.IsPrimary {
-			continue
-		}
-		// meetURL is empty until the primary's event auto-generates it.
-		if link := create(host, hostEventLocation(meetURL, livekitHostURL, bData.LocationValue)); link != "" {
-			// Persist the generated Meet link so the confirmation emails (sent after
-			// this), the booking record, and the manage page show it. bData feeds the
-			// emails; updating it here reaches every send that follows.
+		if link != "" && p.AddMeet {
+			// Persist the generated Meet/Teams link so the confirmation emails (sent
+			// after this), the booking record, and the manage page show it. bData feeds
+			// the emails; updating it here reaches every send that follows.
 			meetURL = link
 			bData.LocationValue = link
+			b.LocationValue = link
 			if _, err := h.db.ExecContext(ctx,
 				`UPDATE bookings SET location_value = ? WHERE id = ?`, link, b.ID); err != nil {
 				h.logger.Error("save meet link", "error", err, "booking_id", b.ID)
 			}
 		}
-		break
 	}
+	params := func(location string, invitee string, guests []calendar.Invitee, mint bool) calendar.CreateEventParams {
+		return calendar.CreateEventParams{
+			// The attendee is added as a calendar invitee, so this text reaches them via
+			// the provider's own native invite (Google/Outlook/CalDAV) — follows their
+			// locale like the confirmation email, not English/host-fixed.
+			Summary:        bData.Tf("calendar_event_summary", in.EventTypeName, in.OrganizerName),
+			Description:    eventDescription(bData.Tf("calendar_event_booking_id", b.ID), location),
+			Location:       location,
+			Start:          b.StartAt,
+			End:            b.EndAt,
+			OrganizerName:  in.OrganizerName,
+			OrganizerEmail: invitee,
+			Guests:         guests,
+			AddMeet:        mint,
+			TimeZone:       timeZone,
+		}
+	}
+
+	// The organizer seat: the meeting host, else the first host with somewhere to write.
+	organizer := -1
+	for i, host := range hosts {
+		if (addMeet && host.UserID == meeting.hostID) || (!addMeet && organizer < 0 && h.hasDestination(ctx, gc, host.UserID)) {
+			organizer = i
+			break
+		}
+	}
+
+	if calendarMode && organizer >= 0 && (len(hosts) > 1 || addMeet) {
+		org := hosts[organizer]
+		// Marked before the write: if it fails, the reconciler heals the organizer seat
+		// with everyone on it rather than giving each host a separate event.
+		if _, err := h.db.ExecContext(ctx,
+			`UPDATE booking_hosts SET invited_via_organizer = (user_id != ?) WHERE booking_id = ?`,
+			org.UserID, b.ID); err != nil {
+			h.logger.Error("mark invited seats", "error", err, "booking_id", b.ID)
+		}
+		via := ""
+		if addMeet {
+			via = meeting.provider
+		}
+		invitees := h.sharedEventInvitees(ctx, gc, guests, hosts, org.UserID, via)
+		write(org, via, params(hostEventLocation(meetURL, livekitHostURL, bData.LocationValue), in.OrganizerEmail, invitees, addMeet))
+		prov := via
+		if prov == "" {
+			prov = gc.DestinationProvider(ctx, org.UserID)
+		}
+		return gc.ProviderInvitesGuests(prov), true
+	}
+
+	// One event per host. The meeting host goes first, through their minting account.
+	ordered := append([]assignedHost(nil), hosts...)
+	if organizer > 0 {
+		ordered[0], ordered[organizer] = ordered[organizer], ordered[0]
+	}
+	invitee := calendarInvitee(b.InviteDelivery, in.OrganizerEmail)
+	var guestList []calendar.Invitee
+	if calendarMode {
+		guestList, _ = guestInvitees(guests)
+	}
+	first := ordered[0]
+	mintFirst := addMeet && first.UserID == meeting.hostID
+	via := ""
+	if mintFirst {
+		via = meeting.provider
+	}
+	// The planned invite, not the write's outcome: a failed write is healed by the
+	// reconciler, whose event invites the booker then - attaching an .ics now as well
+	// would hand them a second copy.
+	if calendarMode {
+		prov := via
+		if prov == "" {
+			prov = gc.DestinationProvider(ctx, first.UserID)
+		}
+		providerInvites = gc.ProviderInvitesGuests(prov)
+	}
+	write(first, via, params(hostEventLocation(meetURL, livekitHostURL, bData.LocationValue), invitee, guestList, mintFirst))
 	location := hostEventLocation(meetURL, livekitHostURL, bData.LocationValue)
 	var wg sync.WaitGroup
-	for _, host := range hosts {
-		if host.IsPrimary {
-			continue
-		}
+	for _, host := range ordered[1:] {
 		wg.Add(1)
 		go func(host assignedHost) {
 			defer wg.Done()
-			create(host, location)
+			write(host, "", params(location, invitee, guestList, false))
 		}(host)
 	}
 	wg.Wait()
+	return providerInvites, false
+}
+
+// hasDestination reports whether userID has a calendar bookings can be written to.
+func (h *Handler) hasDestination(ctx context.Context, gc *calendar.Service, userID string) bool {
+	ok, err := gc.HasDestination(ctx, userID)
+	if err != nil {
+		h.logger.Error("check destination", "error", err, "host", userID)
+	}
+	return ok
 }
 
 // notifyHosts emails each host that has host-booking notifications on. Returns the
 // primary host's notification prefs, for the caller's single attendee-confirmation send,
 // and whether any host email failed.
-func (h *Handler) notifyHosts(ctx context.Context, b *booking.Booking, bData mailer.BookingData, hosts []assignedHost, livekitHostURL string) (hostPrefs, bool) {
+func (h *Handler) notifyHosts(ctx context.Context, b *booking.Booking, bData mailer.BookingData, hosts []assignedHost, livekitHostURL string, sharedInvite bool) (hostPrefs, bool) {
 	primaryPrefs := allOnPrefs
 	confirmFailed := false
 	for _, host := range hosts {
@@ -1321,6 +1422,9 @@ func (h *Handler) notifyHosts(ctx context.Context, b *booking.Booking, bData mai
 			hd := h.hostBookingData(ctx, bData, host, b.InviteDelivery, b.UpdatedAt)
 			if livekitHostURL != "" {
 				hd.LocationValue = livekitHostURL // host email gets the controls-enabled link
+			}
+			if sharedInvite {
+				hd.AttachICS = false // the shared event's provider invite already reached them
 			}
 			if err := sendWithRetry(ctx, h.logger, b.ID, "host/"+host.UserID, func() error {
 				return mailer.SendConfirmationToHost(ctx, h.mailer, hd)
@@ -1419,8 +1523,11 @@ func (h *Handler) dispatchBookingConfirmation(b *booking.Booking, in bookingConf
 		bData.SubjectOverride = subjNote.String
 	}
 
-	meetURL, autoGenMeet, livekitHostURL := h.mintMeetingLink(ctx, b, in, &bData, hosts)
-	h.createHostEvents(ctx, b, in, &bData, hosts, meetURL, autoGenMeet, livekitHostURL)
+	guests := h.loadGuests(ctx, b.ID)
+	_, bData.Guests = guestInvitees(guests)
+	meetURL, meeting, livekitHostURL := h.mintMeetingLink(ctx, b, in, &bData, hosts)
+	inviteTZ := h.inviteTimezone(ctx, b.EventTypeID, in.OrganizerTimezone, primaryHost(hosts).UserID)
+	providerInvites, shared := h.createHostEvents(ctx, b, in, &bData, hosts, guests, meetURL, meeting, livekitHostURL, inviteTZ)
 	// After the calendar phase, so the payload carries a minted Meet/Teams link. Not
 	// bound to ctx: the calendar phase may have spent it, and this is one local insert.
 	if h.webhookSvc != nil {
@@ -1443,18 +1550,27 @@ func (h *Handler) dispatchBookingConfirmation(b *booking.Booking, in bookingConf
 
 	mailCtx, cancelMail := context.WithTimeout(context.Background(), dispatchMailBudget)
 	defer cancelMail()
-	primaryPrefs, confirmFailed := h.notifyHosts(mailCtx, b, bData, hosts, livekitHostURL)
+	primaryPrefs, confirmFailed := h.notifyHosts(mailCtx, b, bData, hosts, livekitHostURL, shared && providerInvites)
 
 	// Attendee confirmation, once. "With:" names the primary host; gated on the
 	// primary host's notification preference (matches prior behaviour).
 	bData.HostName, bData.HostEmail = primaryHost(hosts).Name, primaryHost(hosts).Email
 	h.applyInviteDelivery(mailCtx, &bData, b.InviteDelivery, b.HostID)
+	if b.InviteDelivery != booking.InviteByCalnode {
+		// Keyed on the event actually planned, not the primary's destination: the shared
+		// event may live on another host's calendar.
+		bData.AttachICS = !providerInvites
+	}
 	bData.ICSSequence = int(b.UpdatedAt.Unix())
 	if primaryPrefs.NotifyConfirmation {
 		if err := sendWithRetry(mailCtx, h.logger, b.ID, "attendee", func() error {
 			return mailer.SendConfirmationToAttendee(mailCtx, h.mailer, bData)
 		}); err != nil {
 			confirmFailed = true
+		}
+		if !providerInvites {
+			// Nobody's calendar invited the guests: Calnode does, like it does the booker.
+			h.mailGuests(mailCtx, b.ID, bData, bData.Guests, "confirmation", mailer.SendConfirmationToAttendee)
 		}
 	}
 	if confirmFailed {
@@ -1851,6 +1967,9 @@ func (h *Handler) cancelSideEffects(b booking.Booking) {
 	if hErr != nil {
 		h.logger.Error("booking cancellation: load hosts", "error", hErr, "booking_id", b.ID)
 	}
+	// Decided before the events are cancelled below, which clears their ids.
+	providerInvites := h.providerInvited(ctx, b.InviteDelivery, hosts)
+	_, d.Guests = guestInvitees(h.loadGuests(ctx, b.ID))
 	for _, host := range hosts {
 		if gc != nil && host.ExternalEventID != "" {
 			if err := gc.CancelEvent(ctx, host.UserID, host.ExternalCalendarID, host.ExternalEventID, host.ExternalProvider); err != nil {
@@ -1880,16 +1999,30 @@ func (h *Handler) cancelSideEffects(b booking.Booking) {
 		}
 		if prefs.NotifyHostCancel {
 			hd := h.hostBookingData(ctx, d, host, b.InviteDelivery, b.UpdatedAt)
+			if host.InvitedViaOrganizer && providerInvites {
+				hd.AttachICS = false // the shared event's cancellation reaches them from the provider
+			}
 			if err := mailer.SendCancellationToHost(ctx, h.mailer, hd); err != nil {
 				h.logger.Error("booking cancellation email (host)", "error", err, "booking_id", b.ID, "host", host.UserID)
 			}
 		}
 	}
+	// The shared event is gone (or going): its invited seats no longer hold a copy.
+	if _, err := h.db.ExecContext(ctx,
+		`UPDATE booking_hosts SET invited_via_organizer = 0 WHERE booking_id = ?`, b.ID); err != nil {
+		h.logger.Error("clear invited seats", "error", err, "booking_id", b.ID)
+	}
 	h.applyInviteDelivery(ctx, &d, b.InviteDelivery, b.HostID)
+	if b.InviteDelivery != booking.InviteByCalnode {
+		d.AttachICS = !providerInvites
+	}
 	d.ICSSequence = int(b.UpdatedAt.Unix())
 	if primaryPrefs.NotifyCancellation {
 		if err := mailer.SendCancellationToAttendee(ctx, h.mailer, d); err != nil {
 			h.logger.Error("booking cancellation email (attendee)", "error", err, "booking_id", b.ID)
+		}
+		if !providerInvites {
+			h.mailGuests(ctx, b.ID, d, d.Guests, "cancellation", mailer.SendCancellationToAttendee)
 		}
 	}
 	// Re-read payment state — refundBookingPayment above may have flipped it to 'refunded'.
@@ -2012,6 +2145,9 @@ type assignedHost struct {
 	// Which provider wrote the event. Empty for bookings made before this was
 	// stamped (migration 00062): fall back to id recognition, then the destination.
 	ExternalProvider string
+	// InvitedViaOrganizer: this seat holds no event of its own; the host is an attendee
+	// of the booking's shared event on another host's calendar (migration 90001).
+	InvitedViaOrganizer bool
 }
 
 // assignedHosts returns every host attending a booking, primary first. Group
@@ -2022,7 +2158,8 @@ type assignedHost struct {
 func (h *Handler) assignedHosts(ctx context.Context, bookingID string) ([]assignedHost, error) {
 	rows, err := h.db.QueryContext(ctx, `
 		SELECT bh.user_id, u.name, u.email, bh.is_primary, COALESCE(bh.external_event_id, ''),
-		       COALESCE(bh.external_calendar_id, ''), COALESCE(bh.external_provider, '')
+		       COALESCE(bh.external_calendar_id, ''), COALESCE(bh.external_provider, ''),
+		       bh.invited_via_organizer
 		FROM booking_hosts bh JOIN users u ON u.id = bh.user_id
 		WHERE bh.booking_id = ?
 		ORDER BY bh.is_primary DESC, u.name ASC`, bookingID)
@@ -2034,7 +2171,7 @@ func (h *Handler) assignedHosts(ctx context.Context, bookingID string) ([]assign
 	for rows.Next() {
 		var a assignedHost
 		var primary int
-		if err := rows.Scan(&a.UserID, &a.Name, &a.Email, &primary, &a.ExternalEventID, &a.ExternalCalendarID, &a.ExternalProvider); err != nil {
+		if err := rows.Scan(&a.UserID, &a.Name, &a.Email, &primary, &a.ExternalEventID, &a.ExternalCalendarID, &a.ExternalProvider, &a.InvitedViaOrganizer); err != nil {
 			return nil, err
 		}
 		a.IsPrimary = primary != 0
