@@ -328,3 +328,61 @@ func TestUpdateEvent_emptyEventID_noOp(t *testing.T) {
 		t.Errorf("UpdateEvent(\"\") = %v; want nil", err)
 	}
 }
+
+// Everyone the meeting is for must be on the Google event: Meet admits listed attendees
+// without knocking. The event is written in the requested zone, which is what Google's
+// invitation email renders times in.
+func TestCreateEvent_invitesGuestsInTheirZone(t *testing.T) {
+	srv, gotReq := mockCreateEventServer(t, "ev1", http.StatusOK)
+	c := newTestClient(t)
+	c.apiBase = srv.URL
+	saveDestinationConnection(t, c, "user-1", "primary")
+
+	start := time.Date(2026, 6, 20, 10, 0, 0, 0, time.UTC)
+	c.CreateEvent(context.Background(), "user-1", calendar.CreateEventParams{ //nolint:errcheck
+		Summary: "Intro", Start: start, End: start.Add(time.Hour),
+		OrganizerName: "Alice", OrganizerEmail: "alice@example.com",
+		Guests: []calendar.Invitee{
+			{Email: "bob@example.com"},
+			{Name: "Second Host", Email: "host2@contoso.com"},
+			{Email: "ALICE@example.com"}, // already the organizer
+		},
+		TimeZone: "Asia/Tehran",
+	})
+
+	var emails []string
+	for _, a := range gotReq.Attendees {
+		emails = append(emails, a.Email)
+	}
+	if strings.Join(emails, ",") != "alice@example.com,bob@example.com,host2@contoso.com" {
+		t.Errorf("attendees = %v; want booker, guest and second host once each", emails)
+	}
+	if gotReq.Start.TimeZone != "Asia/Tehran" || gotReq.Start.DateTime != "2026-06-20T13:30:00+03:30" {
+		t.Errorf("start = %+v; want 13:30 Tehran wall clock", gotReq.Start)
+	}
+}
+
+// A reschedule PATCHes an absolute time without a zone, so the zone chosen at creation
+// (the invitation's display zone) survives the move.
+func TestUpdateEvent_keepsTheEventZone(t *testing.T) {
+	var body map[string]map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewDecoder(r.Body).Decode(&body) //nolint:errcheck
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	c := newTestClient(t)
+	c.apiBase = srv.URL
+	saveDestinationConnection(t, c, "user-1", "primary")
+
+	start := time.Date(2026, 6, 21, 10, 0, 0, 0, time.UTC)
+	if err := c.UpdateEvent(context.Background(), "user-1", "primary", "ev1", start, start.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, has := body["start"]["timeZone"]; has {
+		t.Errorf("update sent start.timeZone %v; want it omitted", body["start"]["timeZone"])
+	}
+	if body["start"]["dateTime"] != "2026-06-21T10:00:00Z" {
+		t.Errorf("start.dateTime = %v", body["start"]["dateTime"])
+	}
+}

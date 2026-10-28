@@ -676,3 +676,42 @@ func TestListByHost_empty(t *testing.T) {
 		t.Errorf("ListByHost empty: got %d bookings; want 0", len(bookings))
 	}
 }
+
+func TestCreate_storesGuestsSkippingTheOrganizer(t *testing.T) {
+	database := newTestDB(t)
+	svc := booking.New(database)
+	host := seedHost(t, database)
+	et := seedEventType(t, database, host)
+	start := time.Date(2099, 1, 1, 10, 0, 0, 0, time.UTC)
+	b, err := svc.Create(t.Context(), booking.CreateParams{
+		EventTypeID: et, HostIDs: []string{host}, RoutingMode: "fixed",
+		StartAt: start, EndAt: start.Add(30 * time.Minute),
+		Organizer: booking.Attendee{Name: "Alice", Email: "alice@example.com", IANATimezone: "Asia/Tehran"},
+		Guests: []booking.Attendee{
+			{Email: "bob@example.com"},
+			{Email: "ALICE@example.com"}, // the organizer again
+			{Email: "Bob@Example.com"},   // duplicate guest
+			{Email: "carol@example.com", IANATimezone: "Europe/Berlin"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	guests, err := svc.Guests(t.Context(), b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(guests) != 2 || guests[0].Email != "bob@example.com" || guests[1].Email != "carol@example.com" {
+		t.Fatalf("guests = %+v; want bob then carol", guests)
+	}
+	if guests[0].IANATimezone != "Asia/Tehran" || guests[1].IANATimezone != "Europe/Berlin" {
+		t.Errorf("guest zones = %q, %q; want the booker's zone as the default", guests[0].IANATimezone, guests[1].IANATimezone)
+	}
+	var organizers int
+	if err := database.QueryRow(`SELECT COUNT(*) FROM booking_attendees WHERE booking_id = ? AND is_organizer = 1`, b.ID).Scan(&organizers); err != nil {
+		t.Fatal(err)
+	}
+	if organizers != 1 {
+		t.Errorf("organizer rows = %d; want 1", organizers)
+	}
+}

@@ -24,6 +24,20 @@ type CreateEventParams struct {
 	OrganizerName  string
 	OrganizerEmail string
 	AddMeet        bool
+	// Guests are invited alongside the booker (OrganizerEmail): the booker's additional
+	// guests and, on a multi-host booking's single shared event, the other hosts. Anyone
+	// listed here is on the provider's attendee list - for Google Meet that is what lets
+	// them in without knocking.
+	Guests []Invitee
+	// TimeZone is the IANA zone the event is written in ("" = UTC). Google renders its
+	// invitation email's times in it for recipients who have no Google calendar setting.
+	TimeZone string
+}
+
+// Invitee is one attendee on a provider event.
+type Invitee struct {
+	Name  string
+	Email string
 }
 
 // CalendarInfo is one calendar the provider exposes for a connected account.

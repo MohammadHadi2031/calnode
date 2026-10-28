@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/calnode/calnode/internal/calendar"
@@ -15,7 +16,9 @@ import (
 
 type calEventDateTime struct {
 	DateTime string `json:"dateTime"`
-	TimeZone string `json:"timeZone"`
+	// omitempty: an update sends an absolute (offset-carrying) dateTime only, so the zone
+	// the event was created in - the one its invitations render in - is left as it was.
+	TimeZone string `json:"timeZone,omitempty"`
 }
 
 type calEventAttendee struct {
@@ -84,19 +87,27 @@ func (c *Client) CreateEvent(ctx context.Context, userID string, p calendar.Crea
 	}
 
 	attendees := []calEventAttendee{}
-	if p.OrganizerEmail != "" {
-		attendees = append(attendees, calEventAttendee{
-			Email:       p.OrganizerEmail,
-			DisplayName: p.OrganizerName,
-		})
+	seen := map[string]bool{}
+	add := func(email, name string) {
+		key := strings.ToLower(email)
+		if email == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		attendees = append(attendees, calEventAttendee{Email: email, DisplayName: name})
+	}
+	add(p.OrganizerEmail, p.OrganizerName)
+	for _, g := range p.Guests {
+		add(g.Email, g.Name)
 	}
 
+	start, end := eventTimes(p.Start, p.End, p.TimeZone)
 	reqBody := calEventReq{
 		Summary:     p.Summary,
 		Description: p.Description,
 		Location:    p.Location,
-		Start:       calEventDateTime{DateTime: p.Start.UTC().Format(time.RFC3339), TimeZone: "UTC"},
-		End:         calEventDateTime{DateTime: p.End.UTC().Format(time.RFC3339), TimeZone: "UTC"},
+		Start:       start,
+		End:         end,
 		Attendees:   attendees,
 	}
 	if p.AddMeet {
@@ -166,8 +177,8 @@ func (c *Client) UpdateEvent(ctx context.Context, userID, calendarID, eventID st
 		Start calEventDateTime `json:"start"`
 		End   calEventDateTime `json:"end"`
 	}{
-		Start: calEventDateTime{DateTime: start.UTC().Format(time.RFC3339), TimeZone: "UTC"},
-		End:   calEventDateTime{DateTime: end.UTC().Format(time.RFC3339), TimeZone: "UTC"},
+		Start: calEventDateTime{DateTime: start.UTC().Format(time.RFC3339)},
+		End:   calEventDateTime{DateTime: end.UTC().Format(time.RFC3339)},
 	})
 	if err != nil {
 		return fmt.Errorf("gcal: update event marshal: %w", err)
@@ -230,4 +241,18 @@ func (c *Client) CancelEvent(ctx context.Context, userID, calendarID, eventID st
 		return fmt.Errorf("gcal: cancel event status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// eventTimes writes start/end as wall-clock times in the IANA zone tz, falling back to
+// UTC for "" or a zone this build does not know.
+func eventTimes(start, end time.Time, tz string) (calEventDateTime, calEventDateTime) {
+	loc := time.UTC
+	if tz != "" {
+		if l, err := time.LoadLocation(tz); err == nil {
+			loc = l
+		}
+	}
+	name := loc.String()
+	return calEventDateTime{DateTime: start.In(loc).Format(time.RFC3339), TimeZone: name},
+		calEventDateTime{DateTime: end.In(loc).Format(time.RFC3339), TimeZone: name}
 }

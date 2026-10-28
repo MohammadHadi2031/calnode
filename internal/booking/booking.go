@@ -96,7 +96,11 @@ type CreateParams struct {
 	LocationValue string
 	LocationType  string
 	Organizer     Attendee
-	Answers       []Answer
+	// Guests are additional invitees the booker added (booking_attendees rows with
+	// is_organizer = 0). They are invited to the meeting but cannot manage the booking.
+	// The caller validates and dedupes them; Create skips any that repeat the organizer.
+	Guests  []Attendee
+	Answers []Answer
 	// MaxActivePerInvitee caps how many active (upcoming, non-cancelled) bookings
 	// the organizer's email may already hold for this event type. 0 = unlimited.
 	MaxActivePerInvitee int

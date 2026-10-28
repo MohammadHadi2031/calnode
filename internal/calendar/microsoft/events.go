@@ -80,11 +80,21 @@ func (c *Client) CreateEvent(ctx context.Context, userID string, p calendar.Crea
 	if p.Location != "" {
 		reqBody.Location = &graphLocation{DisplayName: p.Location}
 	}
-	if p.OrganizerEmail != "" {
+	seen := map[string]bool{}
+	invite := func(email, name string) {
+		key := strings.ToLower(email)
+		if email == "" || seen[key] {
+			return
+		}
+		seen[key] = true
 		a := graphAttendee{Type: "required"}
-		a.EmailAddress.Address = p.OrganizerEmail
-		a.EmailAddress.Name = p.OrganizerName
+		a.EmailAddress.Address = email
+		a.EmailAddress.Name = name
 		reqBody.Attendees = append(reqBody.Attendees, a)
+	}
+	invite(p.OrganizerEmail, p.OrganizerName)
+	for _, g := range p.Guests {
+		invite(g.Email, g.Name)
 	}
 	if p.AddMeet {
 		reqBody.IsOnlineMeeting = true

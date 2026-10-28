@@ -201,6 +201,25 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*Booking, error) 
 		return nil, fmt.Errorf("booking: insert attendee: %w", err)
 	}
 
+	seen := map[string]bool{strings.ToLower(p.Organizer.Email): true}
+	for _, g := range p.Guests {
+		key := strings.ToLower(g.Email)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		gtz := g.IANATimezone
+		if gtz == "" {
+			gtz = tz // unknown: assume the booker's, who invited them
+		}
+		if _, err = tx.ExecContext(ctx, `
+			INSERT INTO booking_attendees (id, booking_id, name, email, iana_timezone, is_organizer, locale)
+			VALUES (?, ?, ?, ?, ?, 0, ?)`,
+			uid.New(), bookingID, g.Name, g.Email, gtz, locale); err != nil {
+			return nil, fmt.Errorf("booking: insert guest: %w", err)
+		}
+	}
+
 	for _, ans := range p.Answers {
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO booking_answers (id, booking_id, question_id, value)
@@ -730,4 +749,27 @@ func scanBooking(s scanner) (*Booking, error) {
 	}
 	b.ConfirmFailed = confirmFailed != 0
 	return &b, nil
+}
+
+// Guests returns a booking's additional guests (booking_attendees rows that are not the
+// organizer), in the order they were added. Read fully before returning: callers go on
+// to make provider calls and further queries on the single-connection pool.
+func (s *Service) Guests(ctx context.Context, bookingID string) ([]Attendee, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT name, email, iana_timezone, COALESCE(locale, 'en') FROM booking_attendees
+		WHERE booking_id = ? AND is_organizer = 0
+		ORDER BY rowid`, bookingID)
+	if err != nil {
+		return nil, fmt.Errorf("booking: load guests: %w", err)
+	}
+	defer rows.Close()
+	var out []Attendee
+	for rows.Next() {
+		var a Attendee
+		if err := rows.Scan(&a.Name, &a.Email, &a.IANATimezone, &a.Locale); err != nil {
+			return nil, fmt.Errorf("booking: scan guest: %w", err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
