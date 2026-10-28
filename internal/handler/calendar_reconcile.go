@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/calnode/calnode/internal/booking"
 	"github.com/calnode/calnode/internal/calendar"
 	"github.com/calnode/calnode/internal/i18n"
 )
@@ -187,20 +188,23 @@ func (h *Handler) reconcileCreations(ctx context.Context, gc *calendar.Service) 
 	cutoff := nowT.Add(-5 * time.Minute).Format(time.RFC3339)
 	type missing struct {
 		bookingID, userID, etName, orgName, orgEmail, orgLocale, startStr, endStr string
-		locationType, bookingLoc, inviteMode                                      string
-		isPrimary                                                                 bool
+		locationType, bookingLoc, inviteMode, etID, orgTZ                         string
+		isPrimary, sharedOrganizer                                                bool
 	}
 	var items []missing
 	rows, err := h.db.QueryContext(ctx, `
 		SELECT bh.booking_id, bh.user_id, bh.is_primary, et.name, COALESCE(NULLIF(b.location_type, ''), et.location_type),
 		       COALESCE(b.location_value, ''), b.invite_delivery,
-		       COALESCE(o.name, ''), COALESCE(o.email, ''), COALESCE(o.locale, ''), b.start_at, b.end_at
+		       COALESCE(o.name, ''), COALESCE(o.email, ''), COALESCE(o.locale, ''), b.start_at, b.end_at,
+		       b.event_type_id, COALESCE(o.iana_timezone, ''),
+		       EXISTS (SELECT 1 FROM booking_hosts x WHERE x.booking_id = b.id AND x.invited_via_organizer = 1)
 		FROM booking_hosts bh
 		JOIN bookings b ON b.id = bh.booking_id
 		JOIN event_types et ON et.id = b.event_type_id
 		LEFT JOIN booking_attendees o ON o.booking_id = b.id AND o.is_organizer = 1
 		WHERE b.status = 'confirmed' AND b.end_at > ? AND b.created_at < ?
-		  AND COALESCE(bh.external_event_id, '') = ''`, now, cutoff)
+		  AND COALESCE(bh.external_event_id, '') = ''
+		  AND bh.invited_via_organizer = 0`, now, cutoff)
 	if err != nil {
 		h.logger.Error("reconcile: query missing events", "error", err)
 		return
@@ -209,7 +213,8 @@ func (h *Handler) reconcileCreations(ctx context.Context, gc *calendar.Service) 
 		var m missing
 		var primary int
 		if err := rows.Scan(&m.bookingID, &m.userID, &primary, &m.etName, &m.locationType,
-			&m.bookingLoc, &m.inviteMode, &m.orgName, &m.orgEmail, &m.orgLocale, &m.startStr, &m.endStr); err == nil {
+			&m.bookingLoc, &m.inviteMode, &m.orgName, &m.orgEmail, &m.orgLocale, &m.startStr, &m.endStr,
+			&m.etID, &m.orgTZ, &m.sharedOrganizer); err == nil {
 			m.isPrimary = primary != 0
 			items = append(items, m)
 		}
@@ -217,40 +222,65 @@ func (h *Handler) reconcileCreations(ctx context.Context, gc *calendar.Service) 
 	rows.Close() // #nosec G104 -- rows already fully consumed above; nothing actionable on close error
 
 	for _, m := range items {
-		has, err := gc.HasDestination(ctx, m.userID)
-		if err != nil {
-			h.logger.Error("reconcile: check destination", "error", err, "host", m.userID)
-			continue
+		// Online meeting (Meet/Teams) with no link yet: mint it through whichever of this
+		// host's accounts can (fork: not only their destination), when this seat is the
+		// one that should - the primary, or a shared event's organizer.
+		via := ""
+		if (m.isPrimary || m.sharedOrganizer) && m.bookingLoc == "" && onlineMeetingLocation(m.locationType) {
+			if prov, perr := gc.MeetingProvider(ctx, m.userID, m.locationType); perr == nil {
+				via = prov
+			}
 		}
-		if !has {
-			continue // host has no calendar to write to — nothing to heal
+		if via == "" {
+			has, err := gc.HasDestination(ctx, m.userID)
+			if err != nil {
+				h.logger.Error("reconcile: check destination", "error", err, "host", m.userID)
+				continue
+			}
+			if !has {
+				continue // host has no calendar to write to — nothing to heal
+			}
 		}
 		start, err1 := time.Parse(time.RFC3339, m.startStr)
 		end, err2 := time.Parse(time.RFC3339, m.endStr)
 		if err1 != nil || err2 != nil {
 			continue
 		}
-		// Online meeting (Meet/Teams): the primary's healed event mints the link only
-		// when its connected provider natively matches the platform (Meet↔Google,
-		// Teams↔Microsoft) and the booking has no link yet; otherwise keep the
-		// existing/manual link via Location and never fabricate the wrong kind.
-		autoGenMeet := false
-		if m.isPrimary && m.bookingLoc == "" && onlineMeetingLocation(m.locationType) {
-			if _, provider, perr := gc.Connected(ctx, m.userID); perr == nil {
-				autoGenMeet = providerMintsPlatform(m.locationType, provider)
+		guests := h.loadGuests(ctx, m.bookingID)
+		var invitees []calendar.Invitee
+		switch {
+		case m.inviteMode == booking.InviteByCalnode:
+			// guestless, like the original
+		case m.sharedOrganizer:
+			hosts, herr := h.assignedHosts(ctx, m.bookingID)
+			if herr != nil {
+				h.logger.Error("reconcile: load hosts", "error", herr, "booking_id", m.bookingID)
+				continue
 			}
+			invitees = h.sharedEventInvitees(ctx, gc, guests, hosts, m.userID, via)
+		default:
+			invitees, _ = guestInvitees(guests)
 		}
 		loc := i18n.Get(m.orgLocale) // nil (→ English) if empty/unrecognized; i18n.Locale.T handles nil safely
-		eventID, link, calID, provider, err := gc.CreateEvent(ctx, m.userID, calendar.CreateEventParams{
+		params := calendar.CreateEventParams{
 			Summary:        loc.Tf("calendar_event_summary", m.etName, m.orgName),
-			Description:    loc.Tf("calendar_event_booking_id", m.bookingID),
+			Description:    eventDescription(loc.Tf("calendar_event_booking_id", m.bookingID), m.bookingLoc),
 			Location:       m.bookingLoc,
 			Start:          start,
 			End:            end,
 			OrganizerName:  m.orgName,
 			OrganizerEmail: calendarInvitee(m.inviteMode, m.orgEmail),
-			AddMeet:        autoGenMeet,
-		})
+			Guests:         invitees,
+			AddMeet:        via != "",
+			TimeZone:       h.inviteTimezone(ctx, m.etID, m.orgTZ, m.userID),
+		}
+		var eventID, link, calID, provider string
+		var err error
+		if via != "" {
+			eventID, link, calID, provider, err = gc.CreateEventVia(ctx, m.userID, via, params)
+		} else {
+			eventID, link, calID, provider, err = gc.CreateEvent(ctx, m.userID, params)
+		}
 		if err != nil {
 			h.logger.Error("reconcile: create missing event", "error", err, "booking_id", m.bookingID, "host", m.userID)
 			continue
@@ -270,11 +300,11 @@ func (h *Handler) reconcileCreations(ctx context.Context, gc *calendar.Service) 
 				`UPDATE bookings SET external_event_id = ? WHERE id = ?`, eventID, m.bookingID); err != nil {
 				h.logger.Error("reconcile: save healed booking event id", "error", err, "booking_id", m.bookingID)
 			}
-			if link != "" {
-				if _, err := h.db.ExecContext(ctx,
-					`UPDATE bookings SET location_value = ? WHERE id = ?`, link, m.bookingID); err != nil {
-					h.logger.Error("reconcile: save healed meet link", "error", err, "booking_id", m.bookingID)
-				}
+		}
+		if link != "" && params.AddMeet {
+			if _, err := h.db.ExecContext(ctx,
+				`UPDATE bookings SET location_value = ? WHERE id = ?`, link, m.bookingID); err != nil {
+				h.logger.Error("reconcile: save healed meet link", "error", err, "booking_id", m.bookingID)
 			}
 		}
 	}

@@ -314,7 +314,18 @@ func (h *Handler) rescheduleSideEffects(bCopy booking.Booking, capturedEtID stri
 	if tok, err := h.bookingSvc.RotateManageToken(ctx, bCopy.ID); err == nil {
 		d.ManageURL = h.publicURL() + "/manage/" + tok
 	}
+	hosts, hErr := h.assignedHosts(ctx, bCopy.ID)
+	if hErr != nil || len(hosts) == 0 {
+		h.logger.Error("reschedule: load hosts", "error", hErr, "booking_id", bCopy.ID)
+		hosts = []assignedHost{{UserID: bCopy.HostID, Name: d.HostName, Email: d.HostEmail, IsPrimary: true}}
+	}
+	// After moveCalendarEvents: a moved provider event has re-notified its attendees.
+	providerInvites := h.providerInvited(ctx, bCopy.InviteDelivery, hosts)
+	_, d.Guests = guestInvitees(h.loadGuests(ctx, bCopy.ID))
 	h.applyInviteDelivery(ctx, &d, bCopy.InviteDelivery, bCopy.HostID)
+	if bCopy.InviteDelivery != booking.InviteByCalnode {
+		d.AttachICS = !providerInvites
+	}
 	d.ICSSequence = int(bCopy.UpdatedAt.Unix())
 
 	prefs := h.hostPrefsOrDefault(ctx, bCopy.ID, bCopy.HostID)
@@ -331,12 +342,28 @@ func (h *Handler) rescheduleSideEffects(bCopy booking.Booking, capturedEtID stri
 		if err := mailer.SendRescheduleToAttendee(ctx, h.mailer, d); err != nil {
 			h.logger.Error("reschedule email (attendee)", "error", err, "booking_id", bCopy.ID)
 		}
+		if !providerInvites {
+			h.mailGuests(ctx, bCopy.ID, d, d.Guests, "reschedule", mailer.SendRescheduleToAttendee)
+		}
 	}
-	if prefs.NotifyHostReschedule {
+	// Every host on the booking, each by their own preference - not only the primary,
+	// which left a collective's co-hosts unaware their meeting had moved.
+	for _, host := range hosts {
+		hp := prefs
+		if !host.IsPrimary {
+			hp = h.hostPrefsOrDefault(ctx, bCopy.ID, host.UserID)
+		}
+		if !hp.NotifyHostReschedule {
+			continue
+		}
 		hd := d
-		h.applyHostInvite(ctx, &hd, bCopy.InviteDelivery, bCopy.HostID)
+		hd.HostName, hd.HostEmail = host.Name, host.Email
+		h.applyHostInvite(ctx, &hd, bCopy.InviteDelivery, host.UserID)
+		if host.InvitedViaOrganizer && providerInvites {
+			hd.AttachICS = false // the shared event's update reached them from the provider
+		}
 		if err := mailer.SendRescheduleToHost(ctx, h.mailer, hd); err != nil {
-			h.logger.Error("reschedule email (host)", "error", err, "booking_id", bCopy.ID)
+			h.logger.Error("reschedule email (host)", "error", err, "booking_id", bCopy.ID, "host", host.UserID)
 		}
 	}
 

@@ -510,7 +510,10 @@ func (h *Handler) ownCalendarEvents(ctx context.Context, userID, from, to string
 	rows, err := h.db.QueryContext(ctx, `
 		SELECT b.start_at, b.end_at FROM bookings b
 		JOIN booking_hosts bh ON bh.booking_id = b.id
-		WHERE bh.user_id = ? AND COALESCE(bh.external_event_id, '') != ''
+		WHERE bh.user_id = ?
+		  AND (COALESCE(bh.external_event_id, '') != ''
+		       -- fork: an invited seat's copy of the shared event (cleared on cancel)
+		       OR (bh.invited_via_organizer = 1 AND b.status != 'cancelled'))
 		  AND b.start_at < ? AND b.end_at > ?`, userID, to, from)
 	if err != nil {
 		return nil, err

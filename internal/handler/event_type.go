@@ -45,13 +45,18 @@ type eventTypeJSON struct {
 	// InviteDelivery is who sends the booker's calendar invite: "calendar" (each host's
 	// connected calendar, from the host's own address) or "calnode" (Calnode's own .ics,
 	// from the instance sender, so no host address reaches the booker). See migration 00068.
-	InviteDelivery  string  `json:"invite_delivery"`
-	IsPublic        bool    `json:"is_public"`
-	CreatedAt       string  `json:"created_at"`
-	MsgConfirmation *string `json:"msg_confirmation"`
-	MsgCancellation *string `json:"msg_cancellation"`
-	MsgReschedule   *string `json:"msg_reschedule"`
-	MsgReminder     *string `json:"msg_reminder"`
+	InviteDelivery string `json:"invite_delivery"`
+	// Fork (migration 90001): additional guests the booker may add (0 = none), whether
+	// the booker may pick Meet or Teams, and the zone provider invites are written in.
+	MaxGuests             int     `json:"max_guests"`
+	AllowConferenceChoice bool    `json:"allow_conference_choice"`
+	InviteTimezone        string  `json:"invite_timezone"`
+	IsPublic              bool    `json:"is_public"`
+	CreatedAt             string  `json:"created_at"`
+	MsgConfirmation       *string `json:"msg_confirmation"`
+	MsgCancellation       *string `json:"msg_cancellation"`
+	MsgReschedule         *string `json:"msg_reschedule"`
+	MsgReminder           *string `json:"msg_reminder"`
 	// MsgGreeting overrides the conversational assistant's opening line for this event
 	// type. Unlike the Msg* fields above, nil/empty means "no override" — the assistant
 	// falls back to the locale-keyed default greeting, not a fixed English seed.
@@ -107,6 +112,7 @@ func scanEventTypeRow(s rowScanner, trailing ...any) (*eventTypeJSON, error) {
 		&msgConf, &msgCancel, &msgResched, &msgRemind, &msgGreeting,
 		&subjConf, &subjCancel, &subjResched, &subjRemind,
 		&et.PriceCents, &et.Currency, &et.InviteDelivery, &et.DisplayOrder,
+		&et.MaxGuests, &et.AllowConferenceChoice, &et.InviteTimezone,
 	}
 	dests = append(dests, trailing...)
 	err := s.Scan(dests...)
@@ -165,7 +171,8 @@ const etColumns = `id, slug, name, description,
 	is_active, is_public, show_taken_slots, created_at,
 	msg_confirmation, msg_cancellation, msg_reschedule, msg_reminder, msg_greeting,
 	subj_confirmation, subj_cancellation, subj_reschedule, subj_reminder,
-	price_cents, currency, invite_delivery, display_order`
+	price_cents, currency, invite_delivery, display_order,
+	max_guests, allow_conference_choice, invite_timezone`
 
 // selectETCols fetches a single owner-scoped event type (no `owned` column).
 const selectETCols = "SELECT " + etColumns + " FROM event_types"
@@ -234,6 +241,7 @@ func (h *Handler) CreateEventType(w http.ResponseWriter, r *http.Request) {
 		AllowPhoneCall      *bool   `json:"allow_phone_call"`
 		ShowTakenSlots      *bool   `json:"show_taken_slots"`
 		InviteDelivery      *string `json:"invite_delivery"`
+		forkEventTypeFields
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid JSON")
@@ -308,6 +316,10 @@ func (h *Handler) CreateEventType(w http.ResponseWriter, r *http.Request) {
 	if req.ShowTakenSlots != nil && *req.ShowTakenSlots {
 		showTaken = 1
 	}
+	if msg := req.forkEventTypeFields.validate(); msg != "" {
+		h.writeError(w, http.StatusBadRequest, msg)
+		return
+	}
 	inviteDelivery := booking.InviteByCalendar
 	if req.InviteDelivery != nil {
 		mode, ok := normalizeInviteDelivery(*req.InviteDelivery)
@@ -353,6 +365,12 @@ func (h *Handler) CreateEventType(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.logger.ErrorContext(r.Context(), "create event type", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	if err = req.forkEventTypeFields.apply(r.Context(), tx, id); err != nil {
+		h.logger.ErrorContext(r.Context(), "create event type: fork fields", "error", err)
 		h.writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
@@ -478,18 +496,19 @@ func (h *Handler) PatchEventType(w http.ResponseWriter, r *http.Request) {
 		ShowTakenSlots      *bool   `json:"show_taken_slots"`
 		InviteDelivery      *string `json:"invite_delivery"`
 		Archived            *bool   `json:"archived"`
-		MsgConfirmation     *string `json:"msg_confirmation"`
-		MsgCancellation     *string `json:"msg_cancellation"`
-		MsgReschedule       *string `json:"msg_reschedule"`
-		MsgReminder         *string `json:"msg_reminder"`
-		MsgGreeting         *string `json:"msg_greeting"`
-		SubjConfirmation    *string `json:"subj_confirmation"`
-		SubjCancellation    *string `json:"subj_cancellation"`
-		SubjReschedule      *string `json:"subj_reschedule"`
-		SubjReminder        *string `json:"subj_reminder"`
-		PriceCents          *int    `json:"price_cents"`
-		Currency            *string `json:"currency"`
-		Reminders           []int   `json:"reminders"` // nil = don't touch; [] = clear all
+		forkEventTypeFields
+		MsgConfirmation  *string `json:"msg_confirmation"`
+		MsgCancellation  *string `json:"msg_cancellation"`
+		MsgReschedule    *string `json:"msg_reschedule"`
+		MsgReminder      *string `json:"msg_reminder"`
+		MsgGreeting      *string `json:"msg_greeting"`
+		SubjConfirmation *string `json:"subj_confirmation"`
+		SubjCancellation *string `json:"subj_cancellation"`
+		SubjReschedule   *string `json:"subj_reschedule"`
+		SubjReminder     *string `json:"subj_reminder"`
+		PriceCents       *int    `json:"price_cents"`
+		Currency         *string `json:"currency"`
+		Reminders        []int   `json:"reminders"` // nil = don't touch; [] = clear all
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid JSON")
@@ -765,6 +784,11 @@ func (h *Handler) PatchEventType(w http.ResponseWriter, r *http.Request) {
 		}
 		set("invite_delivery", newInviteDelivery)
 	}
+	if msg := req.forkEventTypeFields.validate(); msg != "" {
+		h.writeError(w, http.StatusBadRequest, msg)
+		return
+	}
+	req.forkEventTypeFields.each(set)
 
 	// The slug is the public booking URL, so renaming one that is already in circulation
 	// breaks every link to it: an invitation in somebody's inbox, a page embedding the

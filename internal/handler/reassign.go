@@ -99,16 +99,17 @@ func (h *Handler) ReassignBooking(w http.ResponseWriter, r *http.Request) {
 
 	// Capture the old host + calendar event + summary fields before the move.
 	var oldHostID, extEventID, extCalendarID, extProvider, etName, orgName, orgEmail, orgLocale string
+	var oldInvited bool // fork: the moved seat was an attendee of another host's shared event
 	err = h.db.QueryRowContext(r.Context(), `
 		SELECT b.host_id, COALESCE(b.external_event_id,''), COALESCE(bh.external_calendar_id,''),
-		       COALESCE(bh.external_provider,''),
+		       COALESCE(bh.external_provider,''), COALESCE(bh.invited_via_organizer, 0),
 		       et.name, COALESCE(a.name,''), COALESCE(a.email,''), COALESCE(a.locale,'')
 		FROM bookings b
 		JOIN event_types et ON et.id = b.event_type_id
 		LEFT JOIN booking_attendees a ON a.booking_id = b.id AND a.is_organizer = 1
 		LEFT JOIN booking_hosts bh ON bh.booking_id = b.id AND bh.user_id = b.host_id
 		WHERE b.id = ?`, id).
-		Scan(&oldHostID, &extEventID, &extCalendarID, &extProvider, &etName, &orgName, &orgEmail, &orgLocale)
+		Scan(&oldHostID, &extEventID, &extCalendarID, &extProvider, &oldInvited, &etName, &orgName, &orgEmail, &orgLocale)
 	if errors.Is(err, sql.ErrNoRows) {
 		h.writeError(w, http.StatusNotFound, "booking not found")
 		return
@@ -155,7 +156,13 @@ func (h *Handler) ReassignBooking(w http.ResponseWriter, r *http.Request) {
 		// the new host, and persist the new event ID (clearing it if recreation
 		// produced nothing, e.g. the new host has no destination calendar).
 		inviteMode := bCopy.InviteDelivery
-		if gc := h.getCal(); gc != nil {
+		if oldInvited {
+			// The seat had no event of its own: the meeting lives on another host's
+			// calendar, which still lists the old host. Leave it be (rewriting a shared
+			// event's attendees is not supported); the new host gets an .ics below.
+			h.logger.Warn("reassign: moved seat was invited to a shared event; its attendee list is unchanged",
+				"booking_id", bCopy.ID, "old_host", oldHostID)
+		} else if gc := h.getCal(); gc != nil {
 			if extEventID != "" {
 				// Reassignment cancels on the OLD host's calendar. Their stamped provider
 				// routes it ("" falls back to id recognition, then their destination).
@@ -218,6 +225,9 @@ func (h *Handler) ReassignBooking(w http.ResponseWriter, r *http.Request) {
 		if prefs.NotifyHostBooking {
 			hd := d
 			h.applyHostInvite(ctx, &hd, inviteMode, newHostID)
+			if oldInvited {
+				hd.AttachICS = true // no calendar event was written for them
+			}
 			hd.ICSSequence = int(time.Now().Unix())
 			if err := mailer.SendConfirmationToHost(ctx, h.mailer, hd); err != nil {
 				h.logger.Error("reassign: email new host", "error", err, "booking_id", bCopy.ID)
