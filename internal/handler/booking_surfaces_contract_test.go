@@ -127,3 +127,67 @@ func TestEmbedJSDoesNotDependOnBookingLogic(t *testing.T) {
 		}
 	}
 }
+
+// TestCreationSurfacesShareGuestsAndConferenceHooks pins the additional-guests field and
+// the Google Meet / Microsoft Teams choice on the two surfaces that CREATE bookings:
+// book.html and embed.js. Both are authored separately (Go template vs DOM-building JS)
+// and styled once in booking.css, so the class names, the locale keys and the POST field
+// names have to agree or one surface silently loses the feature. manage.html is left out
+// on purpose: guests and the platform are chosen at creation, not on reschedule.
+func TestCreationSurfacesShareGuestsAndConferenceHooks(t *testing.T) {
+	var bookBuf bytes.Buffer
+	// Rendered with both features on: the markup is conditional on them.
+	data := bookPageData{T: i18n.Default().T, MaxGuests: 3, GuestsHint: "hint",
+		ConferenceChoice: true, DefaultConference: "teams"}
+	if err := bookTmpl.Execute(&bookBuf, data); err != nil {
+		t.Fatalf("book render: %v", err)
+	}
+	surfaces := map[string]string{
+		"book.html": bookBuf.String(),
+		"embed.js":  string(embedJS),
+	}
+	hooks := []string{
+		// booking.css classes
+		"guests-field", "guest-list", "guest-chip", "guest-remove", "guest-add-row",
+		"guest-add-btn", "guest-error", "guests-hint",
+		"conference-field", "conference-options", "conference-option",
+		// POST /v1/bookings fields and the radio values
+		"guests:", "conference:", `"google_meet"`, `"teams"`,
+	}
+	for _, h := range hooks {
+		for name, src := range surfaces {
+			// Quote style differs (template attributes vs JS strings); compare on one.
+			if !strings.Contains(strings.ReplaceAll(src, "'", `"`), h) {
+				t.Errorf("guests/conference hook %q missing from %s — book.html and embed.js "+
+					"have drifted; add it to both or adjust this contract", h, name)
+			}
+		}
+	}
+	// Locale keys: book.html resolves some server-side ({{call .T ...}}), so they are only
+	// visible in its template source, not in the rendered page.
+	sources := map[string]string{"book.html": bookTmplSrc, "embed.js": string(embedJS)}
+	for _, key := range []string{"guests_label", "guests_placeholder", "guests_add", "guests_remove",
+		"guests_duplicate", "guests_self", "err_invalid_guest_email",
+		"conference_label", "conference_google_meet", "conference_teams"} {
+		for name, src := range sources {
+			if !strings.Contains(src, key) {
+				t.Errorf("locale key %q not used by %s — the guests/conference copy has drifted", key, name)
+			}
+		}
+	}
+	// The widget reads these from GET /public; book.go must keep sending them.
+	for _, field := range []string{"max_guests", "guests_hint", "allow_conference_choice", "default_conference"} {
+		if !strings.Contains(string(embedJS), "info."+field) {
+			t.Errorf("embed.js no longer reads /public field %q", field)
+		}
+	}
+	en := i18n.Default()
+	for _, key := range []string{"guests_label", "guests_placeholder", "guests_add", "guests_remove",
+		"guests_hint", "guests_hint_one", "guests_duplicate", "guests_self",
+		"err_invalid_guest_email", "err_too_many_guests",
+		"conference_label", "conference_google_meet", "conference_teams"} {
+		if en.T(key) == key {
+			t.Errorf("locale key %q is missing from en.json", key)
+		}
+	}
+}

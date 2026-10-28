@@ -280,6 +280,61 @@
 .field-checkbox label { font-size: .875rem; color: #374151; margin: 0; cursor: pointer; }
 .required-star { color: #dc2626; }
 
+/* Additional guests — book.html + embed.js (creation-time only, so not on manage.html).
+   Guest emails are added one at a time and show as removable chips above the input. */
+.guest-list { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: .375rem; }
+.guest-list:empty { display: none; }
+.guest-chip {
+  display: inline-flex; align-items: center; gap: .125rem;
+  max-width: 100%; min-width: 0;
+  padding: .1875rem .1875rem .1875rem .625rem;
+  border: 1px solid #e5e7eb; border-radius: 999px;
+  background: #f9fafb; color: #111827; font-size: .8125rem;
+}
+.guest-chip-email { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.guest-remove {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 1.375rem; height: 1.375rem; padding: 0;
+  border: none; border-radius: 50%; background: transparent; color: #6b7280; cursor: pointer;
+}
+.guest-remove:hover { background: #e5e7eb; color: #111827; }
+.guest-add-row { display: flex; gap: .5rem; }
+.guest-add-row input { flex: 1; min-width: 0; }
+.guest-add-btn {
+  flex-shrink: 0; padding: .55rem .875rem;
+  border: 1.5px solid #e5e7eb; border-radius: 8px; background: #fff; color: #111827;
+  font: inherit; font-size: .8125rem; font-weight: 500; cursor: pointer;
+  transition: border-color .12s;
+}
+.guest-add-btn:hover:not(:disabled) { border-color: #111827; }
+.guest-add-btn:disabled, .guest-add-row input:disabled { opacity: .5; cursor: default; }
+.guest-remove:focus-visible, .guest-add-btn:focus-visible { outline: 2px solid #111827; outline-offset: 2px; }
+.guest-error { margin-top: 0; min-height: 0; }
+.guest-error:empty { display: none; }
+.guests-hint { font-size: .75rem; }
+
+/* Conference choice (Google Meet / Microsoft Teams) — a native radio group, each option
+   boxed like the text inputs; the checked one takes the booking accent. */
+.conference-field { display: block; border: 0; padding: 0; margin: 0 0 .75rem; min-width: 0; }
+.conference-field legend { font-size: .75rem; font-weight: 500; color: #6b7280; padding: 0; margin-bottom: .3rem; }
+.conference-options { display: grid; grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr)); gap: .5rem; }
+.field .conference-option {
+  display: flex; align-items: center; gap: .5rem;
+  padding: .55rem .75rem;
+  border: 1.5px solid #e5e7eb; border-radius: 8px;
+  font-size: .875rem; font-weight: 400; color: #111827; cursor: pointer;
+  transition: border-color .12s, box-shadow .12s;
+}
+.field .conference-option:hover { border-color: #d1d5db; }
+.field .conference-option:has(input:checked) { border-color: var(--booking-accent, #111827); box-shadow: 0 0 0 3px rgba(17,24,39,.06); }
+.field .conference-option:focus-within { border-color: var(--booking-accent, #111827); }
+/* Undo the text-input box `.field input` would otherwise give the radio itself. */
+.field .conference-option input,
+.field .conference-option input:focus {
+  width: auto; margin: 0; padding: 0; border: 0; box-shadow: none; flex-shrink: 0;
+  accent-color: var(--booking-accent, #111827); cursor: pointer;
+}
+
 /* Confirmation */
 .confirm-icon {
   width: 48px; height: 48px;

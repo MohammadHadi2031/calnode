@@ -54,6 +54,37 @@
       return value === undefined || value === null ? '' : String(value);
     });
   }
+  // addGuest / guestsForSubmit: the additional-guests list rules (loose email shape,
+  // case-insensitive dedupe, not the booker's own address, the max_guests cap). Mirror
+  // BookingLogic.addGuest / guestsForSubmit in booking-logic.js, where they are tested;
+  // this widget does NOT load that module, so keep the two in step.
+  var GUEST_EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
+  function addGuest(list, raw, bookerEmail, max) {
+    var current = list || [];
+    var email = String(raw == null ? '' : raw).trim();
+    var refuse = function (error) { return { list: current, email: email, error: error }; };
+    if (!email) return refuse('empty');
+    if (current.length >= max) return refuse('full');
+    if (email.length > 254 || !GUEST_EMAIL_RE.test(email)) return refuse('invalid');
+    var lower = email.toLowerCase();
+    if (bookerEmail && lower === String(bookerEmail).trim().toLowerCase()) return refuse('self');
+    for (var i = 0; i < current.length; i++) {
+      if (current[i].toLowerCase() === lower) return refuse('duplicate');
+    }
+    return { list: current.concat([email]), email: email, error: '' };
+  }
+  function guestsForSubmit(list, bookerEmail) {
+    var self = String(bookerEmail || '').trim().toLowerCase();
+    var seen = {};
+    var out = [];
+    (list || []).forEach(function (g) {
+      var lower = String(g).trim().toLowerCase();
+      if (!lower || lower === self || seen[lower]) return;
+      seen[lower] = true;
+      out.push(String(g).trim());
+    });
+    return out;
+  }
   // dowLabels: Monday-first weekday header labels via Intl, matching
   // BookingLogic.dowLabels in booking-logic.js (not literally shared code — this widget
   // doesn't import that module — but the same approach, replacing what used to be a
@@ -76,6 +107,7 @@
   var SVG_BACK = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>';
   var SVG_CHECK = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#16a34a" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
   var SVG_X = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>';
+  var SVG_X_SMALL = '<svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>';
   var SVG_SPARK = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 4.8L18.7 9.7l-4.8 1.9L12 16.4l-1.9-4.8L5.3 9.7l4.8-1.9L12 3z"/></svg>';
   var SVG_CHEV2 = '<svg class="asst-link-arrow" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/></svg>';
 
@@ -598,6 +630,83 @@
       var email = el('input', { type: 'email', required: 'required', autocomplete: 'email', placeholder: t(this.i18n, 'email_placeholder') });
       form.appendChild(el('div', { class: 'field' }, [el('label', { text: t(this.i18n, 'name_label') }), name]));
       form.appendChild(el('div', { class: 'field' }, [el('label', { text: t(this.i18n, 'email_label') }), email]));
+
+      // Additional guests (max_guests > 0) — same markup and classes as book.html, styled
+      // once in booking.css. Creation-time only: there is no reschedule view here anyway.
+      var guests = [];
+      var maxGuests = Number(this.info.max_guests) || 0;
+      var guestInput = null, guestAdd = null, guestList = null, guestErr = null;
+      function renderGuests() {
+        guestList.textContent = '';
+        guests.forEach(function (g, i) {
+          var rm = el('button', { type: 'button', class: 'guest-remove', 'aria-label': fmt(t(self.i18n, 'guests_remove'), [g]), html: SVG_X_SMALL });
+          rm.addEventListener('click', function () {
+            guests = guests.filter(function (_, j) { return j !== i; });
+            renderGuests();
+            guestInput.focus(); // the chip just went; keep focus in the field
+          });
+          guestList.appendChild(el('li', { class: 'guest-chip' }, [el('span', { class: 'guest-chip-email', text: g }), rm]));
+        });
+        var full = guests.length >= maxGuests;
+        guestInput.disabled = full;
+        guestAdd.disabled = full;
+      }
+      // Mirrors tryAddGuest in book.html: false only for input that should block the
+      // booking (a malformed address); on submit a harmless leftover is just cleared.
+      function tryAddGuest(submitting) {
+        var r = addGuest(guests, guestInput.value, email.value, maxGuests);
+        if (r.error === 'empty') { guestErr.textContent = ''; return true; }
+        if (r.error === '') {
+          guests = r.list; guestInput.value = ''; guestErr.textContent = '';
+          renderGuests();
+          if (!submitting && !guestInput.disabled) guestInput.focus();
+          return true;
+        }
+        if (submitting && r.error !== 'invalid') { guestInput.value = ''; guestErr.textContent = ''; return true; }
+        guestErr.textContent =
+          r.error === 'invalid' ? fmt(t(self.i18n, 'err_invalid_guest_email'), [r.email]) :
+          r.error === 'duplicate' ? fmt(t(self.i18n, 'guests_duplicate'), [r.email]) :
+          r.error === 'self' ? t(self.i18n, 'guests_self') : '';
+        return false;
+      }
+      if (maxGuests > 0) {
+        guestInput = el('input', { type: 'email', inputmode: 'email', autocomplete: 'off', id: 'guest-input', placeholder: t(this.i18n, 'guests_placeholder'), 'aria-describedby': 'guests-hint guest-error' });
+        guestAdd = el('button', { type: 'button', class: 'guest-add-btn', text: t(this.i18n, 'guests_add') });
+        guestList = el('ul', { class: 'guest-list' });
+        guestErr = el('p', { class: 'form-error guest-error', id: 'guest-error', role: 'alert' });
+        guestAdd.addEventListener('click', function () { tryAddGuest(false); });
+        // Enter adds the guest instead of submitting the booking.
+        guestInput.addEventListener('keydown', function (e) {
+          if (e.key === 'Enter') { e.preventDefault(); tryAddGuest(false); }
+        });
+        guestInput.addEventListener('input', function () { guestErr.textContent = ''; });
+        form.appendChild(el('div', { class: 'field guests-field' }, [
+          el('label', { for: 'guest-input', text: t(this.i18n, 'guests_label') }),
+          guestList,
+          el('div', { class: 'guest-add-row' }, [guestInput, guestAdd]),
+          guestErr,
+          // guests_hint arrives finished and pluralised from /public, like min_notice_label.
+          el('p', { class: 'hint guests-hint', id: 'guests-hint', text: this.info.guests_hint || '' }),
+        ]));
+      }
+
+      // Conference choice — only when /public says so (already gated on a Meet/Teams
+      // location server-side); preselects the event type's own platform.
+      var confRadios = [];
+      if (this.info.allow_conference_choice) {
+        var defConf = this.info.default_conference === 'teams' ? 'teams' : 'google_meet';
+        var confOpts = [['google_meet', 'conference_google_meet'], ['teams', 'conference_teams']].map(function (o) {
+          var radio = el('input', { type: 'radio', name: 'conference', value: o[0] });
+          if (o[0] === defConf) radio.checked = true;
+          confRadios.push(radio);
+          return el('label', { class: 'conference-option' }, [radio, el('span', { text: t(self.i18n, o[1]) })]);
+        });
+        form.appendChild(el('fieldset', { class: 'field conference-field' }, [
+          el('legend', { text: t(this.i18n, 'conference_label') }),
+          el('div', { class: 'conference-options' }, confOpts),
+        ]));
+      }
+
       var phone = el('input', { type: 'tel', maxlength: '40', autocomplete: 'tel', id: 'phone-call-number' });
       if (this.info.allow_phone_call) form.appendChild(el('div', { class: 'field' }, [el('label', { for: 'phone-call-number', text: t(this.i18n, 'phone_call_number') }), phone]));
       var qInputs = [];
@@ -628,6 +737,11 @@
       form.addEventListener('submit', function (e) {
         e.preventDefault();
         errBox.textContent = '';
+        // A guest typed but never added counts; a malformed one stops here, by its field.
+        if (guestInput && !tryAddGuest(true)) { guestInput.focus(); return; }
+        var guestsOut = guestInput ? guestsForSubmit(guests, email.value) : [];
+        var conference = '';
+        confRadios.forEach(function (r) { if (r.checked) conference = r.value; });
         cta.disabled = true; cta.textContent = t(self.i18n, 'confirming');
         var answers = [];
         qInputs.forEach(function (x) {
@@ -642,7 +756,7 @@
         });
         fetch(BASE + '/v1/bookings', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ event_type_slug: self.slug, start_at: slot.start, name: name.value.trim(), email: email.value.trim().toLowerCase(), phone: phone.value.trim(), timezone: TZ, language: self.locale, hp_extra: hp.value, answers: answers }),
+          body: JSON.stringify({ event_type_slug: self.slug, start_at: slot.start, name: name.value.trim(), email: email.value.trim().toLowerCase(), phone: phone.value.trim(), guests: guestsOut.length ? guestsOut : undefined, conference: conference || undefined, timezone: TZ, language: self.locale, hp_extra: hp.value, answers: answers }),
         }).then(function (r) {
           return r.json().then(function (data) { return { ok: r.ok, status: r.status, data: data }; });
         }).then(function (res) {
