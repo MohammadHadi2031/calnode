@@ -168,5 +168,19 @@
   "directory_empty": "Derzeit ist nichts buchbar.",
   "directory_members": "Teammitglieder",
   "directory_person_subtitle": "Zeit mit %s buchen",
-  "directory_team_subtitle": "Zeit mit dem Team %s buchen"
+  "directory_team_subtitle": "Zeit mit dem Team %s buchen",
+  "err_too_many_guests": "Sie können bis zu %d Gäste hinzufügen.",
+  "err_too_many_guests_one": "Sie können nur einen Gast hinzufügen.",
+  "err_invalid_guest_email": "„%s“ ist keine gültige E-Mail-Adresse.",
+  "guests_label": "Weitere Gäste",
+  "guests_placeholder": "gast@beispiel.de",
+  "guests_add": "Gast hinzufügen",
+  "guests_remove": "%s entfernen",
+  "guests_hint": "Bis zu %d Gäste. Sie erhalten die Kalendereinladung.",
+  "guests_hint_one": "Bis zu 1 Gast. Er oder sie erhält die Kalendereinladung.",
+  "guests_duplicate": "%s steht bereits auf der Gästeliste.",
+  "guests_self": "Das ist Ihre eigene E-Mail-Adresse. Sie erhalten die Einladung ohnehin.",
+  "conference_label": "Videokonferenz",
+  "conference_google_meet": "Google Meet",
+  "conference_teams": "Microsoft Teams"
 }

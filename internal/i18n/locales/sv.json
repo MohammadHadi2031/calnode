@@ -168,5 +168,19 @@
   "directory_empty": "Inget att boka just nu.",
   "directory_members": "Teammedlemmar",
   "directory_person_subtitle": "Boka tid med %s",
-  "directory_team_subtitle": "Boka tid med %s-teamet"
+  "directory_team_subtitle": "Boka tid med %s-teamet",
+  "err_too_many_guests": "Du kan lägga till upp till %d gäster.",
+  "err_too_many_guests_one": "Du kan bara lägga till en gäst.",
+  "err_invalid_guest_email": "”%s” är inte en giltig e-postadress.",
+  "guests_label": "Ytterligare gäster",
+  "guests_placeholder": "gast@exempel.se",
+  "guests_add": "Lägg till gäst",
+  "guests_remove": "Ta bort %s",
+  "guests_hint": "Upp till %d gäster. De får kalenderinbjudan.",
+  "guests_hint_one": "Upp till 1 gäst. Gästen får kalenderinbjudan.",
+  "guests_duplicate": "%s finns redan på gästlistan.",
+  "guests_self": "Det är din egen e-postadress. Du får inbjudan ändå.",
+  "conference_label": "Videokonferens",
+  "conference_google_meet": "Google Meet",
+  "conference_teams": "Microsoft Teams"
 }

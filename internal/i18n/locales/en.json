@@ -175,5 +175,19 @@
   "directory_empty": "Nothing bookable here right now.",
   "directory_members": "Team members",
   "directory_person_subtitle": "Book time with %s",
-  "directory_team_subtitle": "Book time with the %s team"
+  "directory_team_subtitle": "Book time with the %s team",
+  "err_too_many_guests": "You can add up to %d guests.",
+  "err_too_many_guests_one": "You can add only one guest.",
+  "err_invalid_guest_email": "\"%s\" is not a valid email address.",
+  "guests_label": "Additional guests",
+  "guests_placeholder": "guest@example.com",
+  "guests_add": "Add guest",
+  "guests_remove": "Remove %s",
+  "guests_hint": "Up to %d guests. They'll receive the calendar invite.",
+  "guests_hint_one": "Up to 1 guest. They'll receive the calendar invite.",
+  "guests_duplicate": "%s is already on the guest list.",
+  "guests_self": "That's your own email address. You'll receive the invite anyway.",
+  "conference_label": "Video conferencing",
+  "conference_google_meet": "Google Meet",
+  "conference_teams": "Microsoft Teams"
 }

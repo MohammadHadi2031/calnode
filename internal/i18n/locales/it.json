@@ -168,5 +168,19 @@
   "directory_empty": "Niente da prenotare al momento.",
   "directory_members": "Membri del team",
   "directory_person_subtitle": "Prenota del tempo con %s",
-  "directory_team_subtitle": "Prenota del tempo con il team %s"
+  "directory_team_subtitle": "Prenota del tempo con il team %s",
+  "err_too_many_guests": "Puoi aggiungere fino a %d ospiti.",
+  "err_too_many_guests_one": "Puoi aggiungere un solo ospite.",
+  "err_invalid_guest_email": "«%s» non è un indirizzo email valido.",
+  "guests_label": "Ospiti aggiuntivi",
+  "guests_placeholder": "ospite@esempio.it",
+  "guests_add": "Aggiungi ospite",
+  "guests_remove": "Rimuovi %s",
+  "guests_hint": "Fino a %d ospiti. Riceveranno l’invito del calendario.",
+  "guests_hint_one": "Fino a 1 ospite. Riceverà l’invito del calendario.",
+  "guests_duplicate": "%s è già nell’elenco degli ospiti.",
+  "guests_self": "È il tuo indirizzo email. Riceverai comunque l’invito.",
+  "conference_label": "Videoconferenza",
+  "conference_google_meet": "Google Meet",
+  "conference_teams": "Microsoft Teams"
 }
