@@ -47,15 +47,23 @@ func normalizeGuests(raw []string, organizerEmail string, max int, loc *i18n.Loc
 		out = append(out, booking.Attendee{Email: email})
 	}
 	if len(out) > max {
-		return nil, &guestError{loc.Tf("err_too_many_guests", max)}
+		return nil, &guestError{tooManyGuests(loc, max)}
 	}
 	return out, nil
 }
 
-// conferenceChoice applies the booker's Meet/Teams pick to an event type that offers it.
+// tooManyGuests is the cap message, singular for a cap of one ("1 guests" otherwise).
+func tooManyGuests(loc *i18n.Locale, max int) string {
+	if max == 1 {
+		return loc.T("err_too_many_guests_one")
+	}
+	return loc.Tf("err_too_many_guests", max)
+}
+
+// applyConferenceChoice applies the booker's Meet/Teams pick to an event type that offers it.
 // ok=false means the request named a platform this event type does not offer. A switch
 // drops the event type's manual link: it was a link for the other platform.
-func conferenceChoice(et *bookableEventType, choice string, locValue *string) bool {
+func applyConferenceChoice(et *bookableEventType, choice string, locValue *string) bool {
 	switch {
 	case choice == "" || choice == et.LocationType:
 		return true

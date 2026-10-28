@@ -883,7 +883,7 @@ func (h *Handler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(req.Guests) > maxGuestsCeiling {
-		h.writeError(w, http.StatusBadRequest, loc.Tf("err_too_many_guests", et.MaxGuests))
+		h.writeError(w, http.StatusBadRequest, tooManyGuests(loc, et.MaxGuests))
 		return
 	}
 	guests, err := normalizeGuests(req.Guests, req.Email, et.MaxGuests, loc)
@@ -904,7 +904,7 @@ func (h *Handler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 	if et.LocationValue != nil {
 		locValue = *et.LocationValue
 	}
-	if !conferenceChoice(et, strings.TrimSpace(req.Conference), &locValue) {
+	if !applyConferenceChoice(et, strings.TrimSpace(req.Conference), &locValue) {
 		h.writeError(w, http.StatusBadRequest, "conference must be google_meet or teams, and offered by this event type")
 		return
 	}
