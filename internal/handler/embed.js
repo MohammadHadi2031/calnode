@@ -659,7 +659,11 @@
         if (r.error === '') {
           guests = r.list; guestInput.value = ''; guestErr.textContent = '';
           renderGuests();
-          if (!submitting && !guestInput.disabled) guestInput.focus();
+          // At the cap the input just disabled itself; keep focus off <body>.
+          if (!submitting) {
+            if (!guestInput.disabled) guestInput.focus();
+            else if (guestList.lastChild) guestList.lastChild.querySelector('.guest-remove').focus();
+          }
           return true;
         }
         if (submitting && r.error !== 'invalid') { guestInput.value = ''; guestErr.textContent = ''; return true; }

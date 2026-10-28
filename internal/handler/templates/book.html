@@ -742,7 +742,12 @@ body {
       guestInput.value = '';
       errEl.textContent = '';
       renderGuests();
-      if (!submitting && !guestInput.disabled) guestInput.focus();
+      // At the cap the input just disabled itself, which would drop focus to <body>;
+      // land on the newest chip's remove button instead.
+      if (!submitting) {
+        if (!guestInput.disabled) guestInput.focus();
+        else Array.from(document.querySelectorAll('#guest-list .guest-remove')).pop()?.focus();
+      }
       return true;
     }
     if (submitting && r.error !== 'invalid') { guestInput.value = ''; errEl.textContent = ''; return true; }
