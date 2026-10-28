@@ -129,6 +129,49 @@
     });
   }
 
+  // Additional guests (book.html; embed.js carries a mirror). The booker adds guest emails
+  // one at a time; addGuest decides whether the next one goes on the list. Returns
+  // { list, email, error }: `list` is the new list (the same array when refused), `email`
+  // the trimmed input, and `error` one of '' (added), 'empty', 'full', 'invalid', 'self'
+  // (the booker's own address, who is invited anyway) or 'duplicate' (case-insensitive,
+  // because mail addresses are compared that way everywhere a person would notice).
+  //
+  // The shape check is deliberately loose - one @, no spaces or list separators, a dot in
+  // the domain. It exists to catch a typo or a pasted "a@x.com, b@y.com" before the round
+  // trip, not to be the authority: the server validates again and its 400 message is
+  // shown as-is.
+  var GUEST_EMAIL_RE = /^[^\s@,;<>]+@[^\s@,;<>]+\.[^\s@,;<>]+$/;
+  function addGuest(list, raw, bookerEmail, max) {
+    var current = list || [];
+    var email = String(raw == null ? '' : raw).trim();
+    var refuse = function (error) { return { list: current, email: email, error: error }; };
+    if (!email) return refuse('empty');
+    if (current.length >= max) return refuse('full');
+    if (email.length > 254 || !GUEST_EMAIL_RE.test(email)) return refuse('invalid');
+    var lower = email.toLowerCase();
+    if (bookerEmail && lower === String(bookerEmail).trim().toLowerCase()) return refuse('self');
+    for (var i = 0; i < current.length; i++) {
+      if (current[i].toLowerCase() === lower) return refuse('duplicate');
+    }
+    return { list: current.concat([email]), email: email, error: '' };
+  }
+
+  // guestsForSubmit — the guest list as sent with the booking: the booker's own address
+  // dropped (they may have typed it into the guest field before filling in their own), and
+  // case-insensitive duplicates collapsed to the first spelling.
+  function guestsForSubmit(list, bookerEmail) {
+    var self = String(bookerEmail || '').trim().toLowerCase();
+    var seen = {};
+    var out = [];
+    (list || []).forEach(function (g) {
+      var lower = String(g).trim().toLowerCase();
+      if (!lower || lower === self || seen[lower]) return;
+      seen[lower] = true;
+      out.push(String(g).trim());
+    });
+    return out;
+  }
+
   // NOTE: there is deliberately no host-label helper here. Each surface builds its own
   // (hostsLabel in book.go for the server-rendered page, in book.html's script for the
   // post-slot-pick rewrite, and in embed.js), because the label needs the resolved locale's
@@ -144,6 +187,8 @@
     groupSlotsByDay: groupSlotsByDay,
     mergeDaySlots: mergeDaySlots,
     fmt: fmt,
+    addGuest: addGuest,
+    guestsForSubmit: guestsForSubmit,
     formatTime: formatTime,
     formatDay: formatDay,
     dowIndex: dowIndex,

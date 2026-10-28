@@ -108,6 +108,15 @@ type bookPageData struct {
 	TermsURL      string // operator Terms URL; "" hides the footer link
 	// DemoMode shows the "public demo" banner + a noindex meta tag (see internal/demo).
 	DemoMode bool
+	// MaxGuests is how many additional guest emails the booker may add (0 = the guest
+	// field is not rendered). GuestsHint is its finished, pluralised "Up to N guests"
+	// sentence; see guestsHint. Creation-time only: manage.html has neither.
+	MaxGuests  int
+	GuestsHint string
+	// ConferenceChoice shows the Google Meet / Microsoft Teams picker; DefaultConference
+	// is the option preselected in it (the event type's own location type).
+	ConferenceChoice  bool
+	DefaultConference string
 }
 
 // hostDisplay is one host's identity for the public booking page.
@@ -247,6 +256,38 @@ func noticeLabel(minNoticeMinutes int, loc *i18n.Locale) string {
 	return durationLabel(minNoticeMinutes, loc)
 }
 
+// guestsHint is the "Up to N guests" note under the booking form's guest field, or ""
+// when the event type takes no guests. Composed here, not in the pages, so the singular
+// form comes from the locale ("guests_hint_one") instead of three front ends each
+// pluralising on their own.
+func guestsHint(maxGuests int, loc *i18n.Locale) string {
+	switch {
+	case maxGuests <= 0:
+		return ""
+	case maxGuests == 1:
+		return loc.T("guests_hint_one")
+	default:
+		return fmt.Sprintf(loc.T("guests_hint"), maxGuests)
+	}
+}
+
+// conferenceChoice reports whether the booker may pick Google Meet or Microsoft Teams:
+// the event type opts in AND is itself a Meet/Teams type. The toggle is meaningless on
+// any other location (Zoom, a phone number, an address), so it is ignored there rather
+// than offering a platform switch the event type never asked for.
+func conferenceChoice(allow bool, locType string) bool {
+	return allow && onlineMeetingLocation(locType)
+}
+
+// defaultConference is the platform the conference picker starts on: the event type's
+// own location type, or "" when there is no picker to preselect.
+func defaultConference(allow bool, locType string) string {
+	if !conferenceChoice(allow, locType) {
+		return ""
+	}
+	return locType
+}
+
 // soleHostName returns the host's name when the event type has exactly one, else "".
 // See bookPageData.SoleHostName for why a group deliberately yields nothing.
 func soleHostName(hosts []hostDisplay) string {
@@ -346,18 +387,20 @@ func (h *Handler) PublicEventType(w http.ResponseWriter, r *http.Request) {
 		hostName, avatarURL, routingMode, currency string
 		durMins, maxDays, minNotice, priceCents    int
 		msgGreeting                                sql.NullString
-		allowPhoneCall                             bool
+		allowPhoneCall, allowConf                  bool
 		accentColor                                string
+		maxGuests                                  int
 	)
 	err := h.db.QueryRowContext(r.Context(), `
 		SELECT et.id, et.name, COALESCE(et.description, ''),
 		       et.duration_minutes, et.location_type, COALESCE(et.location_value, ''),
 		       et.max_future_days, et.min_notice_minutes, et.routing_mode, u.name, COALESCE(u.avatar_url, ''),
-		       et.price_cents, et.currency, et.msg_greeting, et.allow_phone_call, u.booking_accent
+		       et.price_cents, et.currency, et.msg_greeting, et.allow_phone_call, u.booking_accent,
+		       et.max_guests, et.allow_conference_choice
 		FROM event_types et
 		JOIN users u ON u.id = et.user_id
 		WHERE et.slug = ? AND et.is_active = 1 AND et.is_public = 1`,
-		slug).Scan(&etID, &name, &description, &durMins, &locType, &locValue, &maxDays, &minNotice, &routingMode, &hostName, &avatarURL, &priceCents, &currency, &msgGreeting, &allowPhoneCall, &accentColor)
+		slug).Scan(&etID, &name, &description, &durMins, &locType, &locValue, &maxDays, &minNotice, &routingMode, &hostName, &avatarURL, &priceCents, &currency, &msgGreeting, &allowPhoneCall, &accentColor, &maxGuests, &allowConf)
 	if errors.Is(err, sql.ErrNoRows) {
 		h.writeError(w, http.StatusNotFound, "event type not found")
 		return
@@ -424,6 +467,15 @@ func (h *Handler) PublicEventType(w http.ResponseWriter, r *http.Request) {
 		"booking_accent_foreground": accentForeground(accentColor),
 		"location_label":            locationLabel(locType, locValue, loc),
 		"max_future_days":           maxDays,
+		// Additional guests and the booker's choice of meeting platform, both creation-time
+		// only (the manage page never shows them). max_guests 0 = no guest field at all.
+		// guests_hint is the finished "Up to N guests..." sentence, pluralised server-side.
+		// allow_conference_choice is already gated on the location type, and
+		// default_conference is the option to preselect ("" when there is no choice).
+		"max_guests":              maxGuests,
+		"guests_hint":             guestsHint(maxGuests, loc),
+		"allow_conference_choice": conferenceChoice(allowConf, locType),
+		"default_conference":      defaultConference(allowConf, locType),
 		// min_notice_label is the translated minimum-notice duration ("4 hours"), empty
 		// when the event type sets none. The widget needs it here because the /slots call
 		// it makes later carries no language of its own, and min_notice_minutes alone
@@ -463,17 +515,20 @@ func (h *Handler) BookPage(w http.ResponseWriter, r *http.Request) {
 		currency       string
 		msgGreeting    sql.NullString
 		allowPhoneCall bool
+		allowConf      bool // the stored toggle; conferenceChoice() is what the page acts on
 		accentColor    string
+		maxGuests      int
 	)
 	err := h.db.QueryRowContext(r.Context(), `
 		SELECT et.id, et.name, COALESCE(et.description, ''),
 		       et.duration_minutes, et.location_type, COALESCE(et.location_value, ''),
 		       et.max_future_days, et.min_notice_minutes, et.routing_mode, u.name, COALESCE(u.avatar_url, ''),
-		       et.price_cents, et.currency, et.msg_greeting, et.allow_phone_call, u.booking_accent
+		       et.price_cents, et.currency, et.msg_greeting, et.allow_phone_call, u.booking_accent,
+		       et.max_guests, et.allow_conference_choice
 		FROM event_types et
 		JOIN users u ON u.id = et.user_id
 		WHERE et.slug = ? AND et.is_active = 1 AND et.is_public = 1`,
-		slug).Scan(&etID, &name, &description, &durMins, &locType, &locValue, &maxDays, &minNotice, &routingMode, &hostName, &avatarURL, &priceCents, &currency, &msgGreeting, &allowPhoneCall, &accentColor)
+		slug).Scan(&etID, &name, &description, &durMins, &locType, &locValue, &maxDays, &minNotice, &routingMode, &hostName, &avatarURL, &priceCents, &currency, &msgGreeting, &allowPhoneCall, &accentColor, &maxGuests, &allowConf)
 
 	if errors.Is(err, sql.ErrNoRows) {
 		http.Error(w, "Page not found", http.StatusNotFound)
@@ -582,6 +637,11 @@ func (h *Handler) BookPage(w http.ResponseWriter, r *http.Request) {
 		PrivacyURL:    brand.PrivacyURL,
 		TermsURL:      brand.TermsURL,
 		DemoMode:      h.demoMode,
+
+		MaxGuests:         maxGuests,
+		GuestsHint:        guestsHint(maxGuests, loc),
+		ConferenceChoice:  conferenceChoice(allowConf, locType),
+		DefaultConference: defaultConference(allowConf, locType),
 	}
 
 	h.persistLangOverride(w, r)

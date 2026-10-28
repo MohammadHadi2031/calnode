@@ -168,5 +168,19 @@
   "directory_empty": "Er is momenteel niets te boeken.",
   "directory_members": "Teamleden",
   "directory_person_subtitle": "Boek tijd met %s",
-  "directory_team_subtitle": "Boek tijd met het %s-team"
+  "directory_team_subtitle": "Boek tijd met het %s-team",
+  "err_too_many_guests": "Je kunt maximaal %d gasten toevoegen.",
+  "err_too_many_guests_one": "Je kunt maar één gast toevoegen.",
+  "err_invalid_guest_email": "‘%s’ is geen geldig e-mailadres.",
+  "guests_label": "Extra gasten",
+  "guests_placeholder": "gast@voorbeeld.nl",
+  "guests_add": "Gast toevoegen",
+  "guests_remove": "%s verwijderen",
+  "guests_hint": "Maximaal %d gasten. Zij ontvangen de agenda-uitnodiging.",
+  "guests_hint_one": "Maximaal 1 gast. Die ontvangt de agenda-uitnodiging.",
+  "guests_duplicate": "%s staat al op de gastenlijst.",
+  "guests_self": "Dat is je eigen e-mailadres. Je ontvangt de uitnodiging sowieso.",
+  "conference_label": "Videovergaderen",
+  "conference_google_meet": "Google Meet",
+  "conference_teams": "Microsoft Teams"
 }

@@ -168,5 +168,19 @@
   "directory_empty": "Rien à réserver pour le moment.",
   "directory_members": "Membres de l'équipe",
   "directory_person_subtitle": "Réservez du temps avec %s",
-  "directory_team_subtitle": "Réservez du temps avec l'équipe %s"
+  "directory_team_subtitle": "Réservez du temps avec l'équipe %s",
+  "err_too_many_guests": "Vous pouvez ajouter jusqu’à %d invités.",
+  "err_too_many_guests_one": "Vous ne pouvez ajouter qu’un seul invité.",
+  "err_invalid_guest_email": "« %s » n’est pas une adresse e-mail valide.",
+  "guests_label": "Invités supplémentaires",
+  "guests_placeholder": "invite@exemple.com",
+  "guests_add": "Ajouter un invité",
+  "guests_remove": "Retirer %s",
+  "guests_hint": "Jusqu’à %d invités. Ils recevront l’invitation de calendrier.",
+  "guests_hint_one": "Jusqu’à 1 invité. Il recevra l’invitation de calendrier.",
+  "guests_duplicate": "%s figure déjà dans la liste des invités.",
+  "guests_self": "C’est votre propre adresse e-mail. Vous recevrez l’invitation de toute façon.",
+  "conference_label": "Visioconférence",
+  "conference_google_meet": "Google Meet",
+  "conference_teams": "Microsoft Teams"
 }

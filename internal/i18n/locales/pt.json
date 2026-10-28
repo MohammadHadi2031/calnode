@@ -168,5 +168,19 @@
   "directory_empty": "Nada para reservar no momento.",
   "directory_members": "Membros da equipa",
   "directory_person_subtitle": "Marque tempo com %s",
-  "directory_team_subtitle": "Marque tempo com a equipa %s"
+  "directory_team_subtitle": "Marque tempo com a equipa %s",
+  "err_too_many_guests": "Pode adicionar até %d convidados.",
+  "err_too_many_guests_one": "Só pode adicionar um convidado.",
+  "err_invalid_guest_email": "\"%s\" não é um endereço de e-mail válido.",
+  "guests_label": "Convidados adicionais",
+  "guests_placeholder": "convidado@exemplo.pt",
+  "guests_add": "Adicionar convidado",
+  "guests_remove": "Remover %s",
+  "guests_hint": "Até %d convidados. Receberão o convite do calendário.",
+  "guests_hint_one": "Até 1 convidado. Receberá o convite do calendário.",
+  "guests_duplicate": "%s já está na lista de convidados.",
+  "guests_self": "É o seu próprio endereço de e-mail. Receberá o convite de qualquer forma.",
+  "conference_label": "Videoconferência",
+  "conference_google_meet": "Google Meet",
+  "conference_teams": "Microsoft Teams"
 }

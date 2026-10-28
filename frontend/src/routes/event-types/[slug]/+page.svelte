@@ -45,6 +45,14 @@
 		{ value: 'calnode',  label: 'Calnode, from your workspace' },
 	];
 
+	const INVITE_TIMEZONES = [
+		{ value: 'attendee', label: "Attendee's time zone" },
+		{ value: 'host',     label: "Host's time zone" },
+		{ value: 'utc',      label: 'UTC' },
+	];
+	// Bounds of event_types.max_guests (the column's CHECK constraint).
+	const MAX_GUESTS_LIMIT = 50;
+
 	// ── Event type ───────────────────────────────────────────────────────────────
 	let et = $state<EventType | null>(null);
 	const TABS = [
@@ -72,6 +80,8 @@
 		name: '', slug: '', description: '', duration_minutes: 30, slot_interval_minutes: 30,
 		is_active: true, is_public: true, show_taken_slots: false,
 		invite_delivery: 'calendar' as EventType['invite_delivery'],
+		invite_timezone: 'attendee' as EventType['invite_timezone'],
+		max_guests: 10, allow_conference_choice: false,
 		location_type: 'link', location_value: '',
 		buffer_before_minutes: 0, buffer_after_minutes: 0,
 		min_notice_minutes: 0, max_future_days: 60,
@@ -294,6 +304,9 @@
 				is_public: et.is_public,
 				show_taken_slots: et.show_taken_slots ?? false,
 				invite_delivery: et.invite_delivery ?? 'calendar',
+				invite_timezone: et.invite_timezone ?? 'attendee',
+				max_guests: et.max_guests ?? 10,
+				allow_conference_choice: et.allow_conference_choice ?? false,
 				location_type: et.location_type,
 				location_value: et.location_value ?? '',
 				buffer_before_minutes: et.buffer_before_minutes,
@@ -336,6 +349,11 @@
 		// including when the person is editing something else entirely.
 		if (form.slot_interval_minutes < 1) { toast.error('Slot interval must be at least 1 minute.'); return; }
 		if (form.max_active_bookings < 0) { toast.error('Max active bookings cannot be negative (0 = unlimited).'); return; }
+		// The same bounds the column enforces, so any stored value passes: this cannot make
+		// an event type unsaveable over a field the person did not touch.
+		if (!Number.isInteger(Number(form.max_guests)) || form.max_guests < 0 || form.max_guests > MAX_GUESTS_LIMIT) {
+			toast.error(`Max additional guests must be a whole number from 0 to ${MAX_GUESTS_LIMIT}.`); return;
+		}
 		if (routingMode === 'round_robin' && rotationHosts.length === 0) {
 			toast.error('Add at least one person to the rotation'); return;
 		}
@@ -355,6 +373,9 @@
 				is_public: form.is_public,
 				show_taken_slots: form.show_taken_slots,
 				invite_delivery: form.invite_delivery,
+				invite_timezone: form.invite_timezone,
+				max_guests: Number(form.max_guests),
+				allow_conference_choice: form.allow_conference_choice,
 				allow_phone_call: allowPhoneCall,
 				location_type: form.location_type,
 				location_value: form.location_value.trim() || null,
@@ -722,6 +743,20 @@
 					{/if}
 				</div>
 			</div>
+			{#if isOnlineMeeting(form.location_type)}
+				<!-- Only meaningful for a Meet/Teams type; the public pages ignore the stored
+				     flag on any other location, so it is hidden rather than disabled there. -->
+				<div class="mt-4 flex items-center justify-between gap-4 rounded-md border bg-muted/30 px-3 py-2">
+					<div>
+						<Label for="et-conf-choice" class="text-sm">Let the booker choose Google Meet or Microsoft Teams</Label>
+						<p class="text-xs text-muted-foreground">
+							The booking form offers both, starting on {form.location_type === 'teams' ? 'Microsoft Teams' : 'Google Meet'}.
+							The link comes from the first assigned host whose connected calendar can create the chosen platform.
+						</p>
+					</div>
+					<Switch id="et-conf-choice" bind:checked={form.allow_conference_choice} />
+				</div>
+			{/if}
 		</div>
 
 		<!-- Calendar invites -->
@@ -751,6 +786,33 @@
 						email address. Choose Calnode to keep hosts' addresses private or to book as a team.
 					{/if}
 				</p>
+			</div>
+			<div class="mt-4 grid grid-cols-2 gap-4">
+				<div class="space-y-1.5">
+					<Label for="et-invite-tz">Calendar invite time zone</Label>
+					<Select.Root type="single" bind:value={form.invite_timezone}>
+						<Select.Trigger id="et-invite-tz" class="w-full">
+							{INVITE_TIMEZONES.find((o) => o.value === form.invite_timezone)?.label ?? 'Select…'}
+						</Select.Trigger>
+						<Select.Content>
+							{#each INVITE_TIMEZONES as o}
+								<Select.Item value={o.value} label={o.label}>{o.label}</Select.Item>
+							{/each}
+						</Select.Content>
+					</Select.Root>
+					<p class="text-xs text-muted-foreground">
+						The zone the calendar invite's times are written in. Recipients whose own
+						calendar sets a time zone still see times in theirs.
+					</p>
+				</div>
+				<div class="space-y-1.5">
+					<Label for="et-max-guests">Max additional guests</Label>
+					<Input id="et-max-guests" type="number" min="0" max={MAX_GUESTS_LIMIT} step="1" bind:value={form.max_guests} />
+					<p class="text-xs text-muted-foreground">
+						Extra people the booker can invite by email (up to {MAX_GUESTS_LIMIT}). They receive the
+						calendar invite too. 0 removes the guest field from the booking form.
+					</p>
+				</div>
 			</div>
 			{#if form.invite_delivery === 'calnode' && et?.invite_sender_ready === false}
 				<p class="mt-3 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">

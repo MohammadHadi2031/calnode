@@ -206,6 +206,29 @@ body {
              .ID is the event type's own intake-question primary key (admin-configured, not
              attacker-controlled at booking time), and Go's html/template context-aware-escapes
              every {{.ID}} below regardless — there is no raw/unescaped output here. */}}
+        {{/* Additional guests + conference choice: creation-time only, so book.html and
+             embed.js have them and manage.html deliberately does not. */}}
+        {{if gt .MaxGuests 0}}
+        <div class="field guests-field" id="guests-field" data-max="{{.MaxGuests}}">
+          <label for="f-guest-input">{{call .T "guests_label"}}</label>
+          <ul id="guest-list" class="guest-list"></ul>
+          <div class="guest-add-row">
+            <input id="f-guest-input" type="email" inputmode="email" autocomplete="off" placeholder="{{call .T "guests_placeholder"}}" aria-describedby="guests-hint guest-error">
+            <button type="button" id="guest-add-btn" class="guest-add-btn">{{call .T "guests_add"}}</button>
+          </div>
+          <p id="guest-error" class="form-error guest-error" role="alert"></p>
+          <p id="guests-hint" class="hint guests-hint">{{.GuestsHint}}</p>
+        </div>
+        {{end}}
+        {{if .ConferenceChoice}}
+        <fieldset class="field conference-field">
+          <legend>{{call .T "conference_label"}}</legend>
+          <div class="conference-options">
+            <label class="conference-option"><input type="radio" name="conference" value="google_meet"{{if ne .DefaultConference "teams"}} checked{{end}}><span>{{call .T "conference_google_meet"}}</span></label>
+            <label class="conference-option"><input type="radio" name="conference" value="teams"{{if eq .DefaultConference "teams"}} checked{{end}}><span>{{call .T "conference_teams"}}</span></label>
+          </div>
+        </fieldset>
+        {{end}}
         {{if .PhoneChoice}}
         <div class="field">
           <label for="f-phone">{{call .T "phone_call_number"}}</label>
@@ -276,6 +299,7 @@ body {
   // "%s has no available times"), and "" when it sets no minimum notice.
   const SOLE_HOST        = {{.SoleHostName}};
   const MIN_NOTICE_LABEL = {{.MinNoticeLabel}};
+  const MAX_GUESTS = {{.MaxGuests}}; // 0 = no guest field rendered
   const LOCALE   = "{{.Locale}}";
   const I18N     = window.__CALNODE_I18N || {};
   function t(key) { return I18N[key] || key; } // key itself as a last-resort fallback, matching Locale.T server-side
@@ -668,6 +692,81 @@ body {
   $('back-btn').addEventListener('click', () => showView('slots-view'));
   $('cal-back-btn').addEventListener('click', () => setStep('cal'));
 
+  // ── Additional guests ─────────────────────────────────────────────────────
+  // Added one at a time as removable chips. BookingLogic.addGuest decides what goes on
+  // the list (shape, case-insensitive dedupe, the booker's own address, the cap); the
+  // server checks again and its 400 message lands in #form-error like any other.
+  let guests = [];
+  const guestInput = $('f-guest-input'); // null when the event type takes no guests
+  const SVG_REMOVE = '<svg aria-hidden="true" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>';
+
+  function renderGuests() {
+    const ul = $('guest-list');
+    ul.textContent = '';
+    guests.forEach((g, i) => {
+      const li = document.createElement('li');
+      li.className = 'guest-chip';
+      const label = document.createElement('span');
+      label.className = 'guest-chip-email';
+      label.textContent = g;
+      const rm = document.createElement('button');
+      rm.type = 'button';
+      rm.className = 'guest-remove';
+      rm.setAttribute('aria-label', BookingLogic.fmt(t('guests_remove'), [g]));
+      rm.innerHTML = SVG_REMOVE;
+      rm.addEventListener('click', () => {
+        guests = guests.filter((_, j) => j !== i);
+        renderGuests();
+        guestInput.focus(); // the chip (and its button) just went; don't drop focus to <body>
+      });
+      li.append(label, rm);
+      ul.appendChild(li);
+    });
+    // At the cap the input is disabled rather than erroring on the next add; the hint
+    // under it already says how many are allowed.
+    const full = guests.length >= MAX_GUESTS;
+    guestInput.disabled = full;
+    $('guest-add-btn').disabled = full;
+  }
+
+  // tryAddGuest adds what is in the guest input. Returns false only when the input holds
+  // something that blocks the booking (a malformed address). On submit, a typed-but-not-
+  // added guest is picked up here, and a harmless leftover (duplicate, the booker's own
+  // address) is just cleared instead of standing in the way.
+  function tryAddGuest(submitting) {
+    const errEl = $('guest-error');
+    const r = BookingLogic.addGuest(guests, guestInput.value, $('f-email').value, MAX_GUESTS);
+    if (r.error === 'empty') { errEl.textContent = ''; return true; }
+    if (r.error === '') {
+      guests = r.list;
+      guestInput.value = '';
+      errEl.textContent = '';
+      renderGuests();
+      // At the cap the input just disabled itself, which would drop focus to <body>;
+      // land on the newest chip's remove button instead.
+      if (!submitting) {
+        if (!guestInput.disabled) guestInput.focus();
+        else Array.from(document.querySelectorAll('#guest-list .guest-remove')).pop()?.focus();
+      }
+      return true;
+    }
+    if (submitting && r.error !== 'invalid') { guestInput.value = ''; errEl.textContent = ''; return true; }
+    errEl.textContent =
+      r.error === 'invalid'   ? BookingLogic.fmt(t('err_invalid_guest_email'), [r.email]) :
+      r.error === 'duplicate' ? BookingLogic.fmt(t('guests_duplicate'), [r.email]) :
+      r.error === 'self'      ? t('guests_self') : '';
+    return false;
+  }
+
+  if (guestInput) {
+    $('guest-add-btn').addEventListener('click', () => tryAddGuest(false));
+    // Enter adds the guest instead of submitting the whole booking form.
+    guestInput.addEventListener('keydown', e => {
+      if (e.key === 'Enter') { e.preventDefault(); tryAddGuest(false); }
+    });
+    guestInput.addEventListener('input', () => { $('guest-error').textContent = ''; });
+  }
+
   // ── Booking form ──────────────────────────────────────────────────────────
   $('booking-form').addEventListener('submit', async e => {
     e.preventDefault();
@@ -705,6 +804,10 @@ body {
       answers.push({ question_id: el.dataset.qid, value });
     }
 
+    // A guest typed but never added counts; a malformed one stops here, next to its field.
+    if (guestInput && !tryAddGuest(true)) { guestInput.focus(); return; }
+    const guestList = guestInput ? BookingLogic.guestsForSubmit(guests, form.email.value) : [];
+
     btn.disabled = true; btn.textContent = t('confirming'); errEl.textContent = '';
 
     try {
@@ -717,6 +820,9 @@ body {
           name: form.name.value.trim(),
           email: form.email.value.trim(),
           phone: form.elements.phone?.value.trim() || "",
+          // Both omitted (undefined drops out of JSON) unless the event type offers them.
+          guests: guestList.length ? guestList : undefined,
+          conference: form.elements.conference?.value || undefined,
           timezone: TZ,
           language: LOCALE,
           hp_extra: form.hp_extra.value,

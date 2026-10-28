@@ -25,6 +25,12 @@ export type EventType = {
 	/** Lower first on public person/team pages; ties sort by name, then slug. */
 	display_order: number;
 	allow_phone_call: boolean;
+	/** Additional guest emails a booker may add (0..50; 0 = no guest field). */
+	max_guests: number;
+	/** Google Meet / Teams event types only: let the booker pick either platform. */
+	allow_conference_choice: boolean;
+	/** Time zone the provider calendar invite is written in. */
+	invite_timezone: 'attendee' | 'host' | 'utc';
 	id: string;
 	slug: string;
 	name: string;
