@@ -106,3 +106,48 @@ test('fmt leaves a string with no verbs untouched', () => {
   assert.equal(B.fmt('No available times.', ['unused']), 'No available times.');
   assert.equal(B.fmt('Inga lediga tider.'), 'Inga lediga tider.');
 });
+
+test('addGuest appends a valid, new guest and trims it', () => {
+  const r = B.addGuest([], '  sam@example.com ', 'me@example.com', 3);
+  assert.equal(r.error, '');
+  assert.deepEqual(r.list, ['sam@example.com']);
+  assert.equal(r.email, 'sam@example.com');
+});
+
+test('addGuest refuses empty, malformed and pasted-list input', () => {
+  assert.equal(B.addGuest([], '   ', '', 3).error, 'empty');
+  for (const bad of ['sam', 'sam@', '@example.com', 'sam@example', 'sam @example.com',
+    'a@x.com, b@y.com', 'a@x.com;b@y.com', 'a@@x.com', 'Sam <sam@example.com>']) {
+    assert.equal(B.addGuest([], bad, '', 3).error, 'invalid', bad);
+  }
+  assert.equal(B.addGuest([], 'a'.repeat(250) + '@x.com', '', 3).error, 'invalid');
+});
+
+test('addGuest dedupes case-insensitively and leaves the list untouched', () => {
+  const list = ['Sam@Example.com'];
+  const r = B.addGuest(list, 'sam@example.COM', '', 3);
+  assert.equal(r.error, 'duplicate');
+  assert.strictEqual(r.list, list);
+});
+
+test("addGuest refuses the booker's own address, whatever its case", () => {
+  assert.equal(B.addGuest([], 'Me@Example.com', ' me@example.com ', 3).error, 'self');
+  // No booker email typed yet: nothing to compare against, so it is accepted here and
+  // dropped later by guestsForSubmit.
+  assert.equal(B.addGuest([], 'me@example.com', '', 3).error, '');
+});
+
+test('addGuest stops at the cap', () => {
+  const r = B.addGuest(['a@x.com', 'b@x.com'], 'c@x.com', '', 2);
+  assert.equal(r.error, 'full');
+  assert.equal(r.list.length, 2);
+  assert.equal(B.addGuest([], 'a@x.com', '', 0).error, 'full'); // guests disabled
+});
+
+test("guestsForSubmit drops the booker's own address and duplicates", () => {
+  assert.deepEqual(
+    B.guestsForSubmit(['a@x.com', 'ME@example.com', 'A@X.com', ' b@x.com '], 'me@example.com'),
+    ['a@x.com', 'b@x.com']);
+  assert.deepEqual(B.guestsForSubmit([], 'me@example.com'), []);
+  assert.deepEqual(B.guestsForSubmit(undefined, ''), []);
+});
