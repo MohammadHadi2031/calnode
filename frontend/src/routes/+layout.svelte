@@ -32,6 +32,8 @@
 		$page.route.id === '/invite/[token]'
 	);
 
+	const isWide = $derived($page.route.id === '/schedule');
+
 	const navItems = [
 		{
 			section: 'Scheduling',
@@ -61,6 +63,13 @@
 			label: 'Bookings',
 			adminOnly: false,
 			icon: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>`
+		},
+		{
+			section: 'Scheduling',
+			href: `${base}/schedule`,
+			label: 'Schedule',
+			adminOnly: false,
+			icon: `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.5"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h5"/><path d="M17.5 17.5 16 16.3V14"/><circle cx="16" cy="16" r="6"/></svg>`
 		},
 		{
 			section: 'Scheduling',
@@ -125,7 +134,7 @@
 		navItems.filter(
 			(item) =>
 				(!item.adminOnly || $currentUser?.is_admin) &&
-				!($authStatus.demo_mode && item.label === 'Calendar') &&
+				!($authStatus.demo_mode && (item.label === 'Calendar' || item.label === 'Schedule')) &&
 				(item.requiresFeature !== 'recordings' || recordingsConfigured)
 		)
 	);
@@ -278,7 +287,8 @@
 
 		<!-- Main content -->
 		<main class="flex-1 overflow-y-auto bg-background">
-			<div class="mx-auto max-w-4xl px-8 py-8">
+			<!-- The Schedule page is a week calendar: give it more room than the forms get. -->
+			<div class="mx-auto {isWide ? 'max-w-7xl px-4 sm:px-8' : 'max-w-4xl px-8'} py-8">
 				{@render children()}
 			</div>
 		</main>

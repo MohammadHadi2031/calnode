@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { api, type TeamMember, type Invite, type UpcomingBooking } from '$lib/api';
+	import { api, type TeamMember, type Invite, type UpcomingBooking, type SecretaryAssignment } from '$lib/api';
 	import { currentUser } from '$lib/stores';
 	import { Button } from '$lib/components/ui/button';
 	import { ConfirmDialog } from '$lib/components/ui/confirm-dialog';
@@ -9,6 +9,7 @@
 	import { Label } from '$lib/components/ui/label';
 	import { Badge } from '$lib/components/ui/badge';
 	import * as Select from '$lib/components/ui/select';
+	import { Checkbox } from '$lib/components/ui/checkbox';
 	import { toast } from 'svelte-sonner';
 
 	let members: TeamMember[] = $state([]);
@@ -59,6 +60,56 @@
 
 	let reassignTargets = $derived(members.filter((m) => !m.archived && m.id !== resolveMember?.id));
 
+	// Secretaries (fork): secretary id -> the host ids they manage.
+	let assignments = $state<SecretaryAssignment[]>([]);
+	const secretaryHosts = $derived.by(() => {
+		const map = new Map<string, string[]>();
+		for (const a of assignments) map.set(a.secretary_id, [...(map.get(a.secretary_id) ?? []), a.host_id]);
+		return map;
+	});
+
+	let secOpen = $state(false);
+	let secMember = $state<TeamMember | null>(null);
+	let secChosen = $state<string[]>([]);
+	let secBusy = $state(false);
+	let secError = $state('');
+	let secCandidates = $derived(members.filter((m) => !m.archived && m.id !== secMember?.id));
+
+	async function loadSecretaries() {
+		if (!$currentUser?.is_admin) return;
+		try {
+			const res = await api.get<{ assignments: SecretaryAssignment[] }>('/v1/secretaries');
+			assignments = res.assignments ?? [];
+		} catch {
+			// Non-critical: the badges and prefill just stay empty.
+		}
+	}
+
+	function openSecretary(m: TeamMember) {
+		secMember = m;
+		secChosen = [...(secretaryHosts.get(m.id) ?? [])];
+		secError = '';
+		secOpen = true;
+	}
+
+	function toggleSecHost(id: string, on: boolean) {
+		secChosen = on ? [...secChosen.filter((x) => x !== id), id] : secChosen.filter((x) => x !== id);
+	}
+
+	async function saveSecretary() {
+		const m = secMember;
+		if (!m) return;
+		secBusy = true; secError = '';
+		try {
+			await api.put(`/v1/users/${m.id}/secretary-hosts`, { host_ids: secChosen.filter((id) => id !== m.id) });
+			toast.success(`Updated ${m.name}'s secretary assignments`);
+			secOpen = false;
+			secMember = null;
+			await load();
+		} catch (e: any) { secError = e.message || 'Could not save'; }
+		finally { secBusy = false; }
+	}
+
 	async function load() {
 		try {
 			const [membersRes, invitesRes] = await Promise.all([
@@ -67,6 +118,7 @@
 			]);
 			members = membersRes;
 			invites = invitesRes;
+			await loadSecretaries();
 		} catch (e: any) {
 			error = e.message;
 		} finally {
@@ -386,6 +438,39 @@
 	</Dialog.Content>
 </Dialog.Root>
 
+<!-- Secretary assignments: which hosts this member may manage on the Schedule page -->
+<Dialog.Root bind:open={secOpen}>
+	<Dialog.Content class="max-w-md">
+		<Dialog.Header>
+			<Dialog.Title>{secMember?.name} is secretary for…</Dialog.Title>
+			<Dialog.Description>
+				They can book, move and cancel appointments and block time for the hosts you tick here.
+			</Dialog.Description>
+		</Dialog.Header>
+
+		{#if secError}
+			<p class="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{secError}</p>
+		{/if}
+
+		<div class="max-h-[50vh] space-y-0.5 overflow-y-auto">
+			{#each secCandidates as h (h.id)}
+				<label class="flex cursor-pointer items-center gap-2.5 rounded-md px-2 py-1.5 text-sm hover:bg-muted/50">
+					<Checkbox checked={secChosen.includes(h.id)} onCheckedChange={(v) => toggleSecHost(h.id, v === true)} disabled={secBusy} />
+					<span class="min-w-0 flex-1 truncate">{h.name}</span>
+					<span class="truncate text-xs text-muted-foreground">{h.email}</span>
+				</label>
+			{:else}
+				<p class="text-sm text-muted-foreground">No other active members.</p>
+			{/each}
+		</div>
+
+		<Dialog.Footer class="gap-2">
+			<Button variant="outline" disabled={secBusy} onclick={() => { secOpen = false; }}>Cancel</Button>
+			<Button disabled={secBusy} onclick={saveSecretary}>{secBusy ? 'Saving…' : 'Save'}</Button>
+		</Dialog.Footer>
+	</Dialog.Content>
+</Dialog.Root>
+
 <svelte:head><title>Members — Calnode</title></svelte:head>
 
 <div class="mb-8 flex items-center justify-between">
@@ -507,6 +592,12 @@
 											<Badge variant={roleVariant(m)}>{roleLabel(m)}</Badge>
 										{/if}
 										{#if m.archived}<Badge variant="outline" class="text-xs text-muted-foreground">Archived</Badge>{/if}
+										{#if (secretaryHosts.get(m.id)?.length ?? 0) > 0}
+											{@const n = secretaryHosts.get(m.id)?.length ?? 0}
+											<Badge variant="secondary" class="text-xs" title="Manages {n} host{n === 1 ? '' : 's'} on the Schedule page">
+												Secretary · {n} host{n === 1 ? '' : 's'}
+											</Badge>
+										{/if}
 									</div>
 								</td>
 								<td class="px-4 py-3">
@@ -544,8 +635,13 @@
 												{#if $currentUser.is_owner || m.archived_by === $currentUser.id}
 													<Button size="sm" variant="outline" class="h-7 text-xs" onclick={() => restoreMember(m)}>Restore</Button>
 												{/if}
-											{:else if m.id !== $currentUser.id}
-												{#if resetTarget === m.id}
+											{:else}
+												{#if resetTarget !== m.id}
+													<Button size="sm" variant="ghost" class="h-7 text-xs" onclick={() => openSecretary(m)}>Secretary for…</Button>
+												{/if}
+												{#if m.id === $currentUser.id}
+													<!-- Nothing else to do on your own row. -->
+												{:else if resetTarget === m.id}
 													<div class="flex items-center gap-1.5">
 														{#if resetOk}
 															<span class="text-xs text-green-600 font-medium">Password updated</span>

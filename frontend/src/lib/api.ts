@@ -19,6 +19,8 @@ export type User = {
 	notify_host_booking: boolean;
 	notify_host_cancel: boolean;
 	notify_host_reschedule: boolean;
+	/** Fork: ids of the hosts this user is a secretary for (absent or empty = none). */
+	secretary_for?: string[];
 };
 
 export type EventType = {
@@ -326,6 +328,106 @@ export type AvailabilityOverride = {
 	group_id?: string;
 };
 
+// --- Fork: staff calendar, unavailable blocks, secretaries (docs/fork-staff-calendar.md) ---
+
+export type StaffEventType = {
+	id: string;
+	slug: string;
+	name: string;
+	duration_minutes: number;
+	location_type: string;
+	allow_conference_choice: boolean;
+};
+
+/** A host the caller can manage (self, a secretary assignment, or every host for admins). */
+export type StaffHost = {
+	id: string;
+	name: string;
+	email: string;
+	timezone: string;
+	avatar_url?: string;
+	/** True for the caller's own row. */
+	self: boolean;
+	/** The host has a destination calendar that unavailable blocks can sync to. */
+	has_calendar: boolean;
+	event_types: StaffEventType[];
+};
+
+export type StaffBooking = {
+	id: string;
+	event_type_id: string;
+	event_type_name: string;
+	primary_host_id: string;
+	host_ids: string[];
+	start_at: string;
+	end_at: string;
+	status: string;
+	location_type: string;
+	location_value?: string;
+	attendee_name: string;
+	attendee_email: string;
+	guests?: string[];
+	can_manage: boolean;
+};
+
+export type UnavailableBlock = {
+	id: string;
+	host_id: string;
+	start_at: string;
+	end_at: string;
+	title: string;
+	sync_to_calendar: boolean;
+	/** True once the busy event exists on the host's calendar. */
+	synced: boolean;
+	/** Set when the calendar write failed; the block is saved in Calnode regardless. */
+	sync_error?: string;
+};
+
+/** External calendar busy time (Calnode's own events and blocks already removed). */
+export type ExternalBusy = { host_id: string; start_at: string; end_at: string };
+
+export type BusyError = { host_id: string; error: string };
+
+export type StaffCalendar = {
+	bookings: StaffBooking[];
+	unavailable: UnavailableBlock[];
+	busy: ExternalBusy[];
+	busy_errors: BusyError[];
+};
+
+export type ConflictKind =
+	| 'past'
+	| 'same_start'
+	| 'outside_hours'
+	| 'booking'
+	| 'unavailable'
+	| 'calendar'
+	| 'calendar_unchecked';
+
+export type Conflict = {
+	host_id: string;
+	host_name: string;
+	kind: ConflictKind | string;
+	detail?: string;
+};
+
+/** Body of a 409 from the staff booking / unavailable-block endpoints. */
+export type ConflictResponse = { error: 'conflicts'; conflicts: Conflict[] };
+
+export type SecretaryAssignment = { secretary_id: string; host_id: string };
+
+/** Error thrown by the api client. `status` and `body` are set for HTTP errors. */
+export type ApiError = Error & { status?: number; body?: unknown };
+
+/** The conflict list of a 409 `{error:"conflicts"}` error, or null for any other error. */
+export function conflictsOf(e: unknown): Conflict[] | null {
+	const err = e as ApiError | null;
+	if (!err || err.status !== 409) return null;
+	const body = err.body as Partial<ConflictResponse> | undefined;
+	if (!body || body.error !== 'conflicts' || !Array.isArray(body.conflicts)) return null;
+	return body.conflicts;
+}
+
 async function apiFetch<T>(path: string, opts: RequestInit = {}): Promise<T> {
 	const res = await fetch(path, {
 		credentials: 'same-origin',
@@ -347,8 +449,11 @@ async function apiFetch<T>(path: string, opts: RequestInit = {}): Promise<T> {
 
 	const data = await res.json().catch(() => ({ error: res.statusText }));
 	if (!res.ok) {
-		const err = new Error(data.error ?? `HTTP ${res.status}`) as Error & { status?: number };
+		const err = new Error(data.error ?? `HTTP ${res.status}`) as ApiError;
 		err.status = res.status;
+		// The parsed JSON body, for callers that need more than the message (e.g. a 409
+		// conflict list). Additive: existing callers only read message and status.
+		err.body = data;
 		throw err;
 	}
 	return data as T;

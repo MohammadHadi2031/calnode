@@ -20,8 +20,14 @@
     "test:visual": "vitest run"
   },
   "dependencies": {
+    "@fullcalendar/core": "^6.1.22",
+    "@fullcalendar/daygrid": "^6.1.22",
+    "@fullcalendar/interaction": "^6.1.22",
+    "@fullcalendar/luxon3": "^6.1.22",
+    "@fullcalendar/timegrid": "^6.1.22",
     "clsx": "^2.1.1",
     "cropperjs": "^1.6.2",
+    "luxon": "^3.7.2",
     "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {
@@ -31,6 +37,7 @@
     "@sveltejs/kit": "^2.70.2",
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
     "@tailwindcss/vite": "^4.3.1",
+    "@types/luxon": "^3.7.6",
     "@types/node": "^26.6.5",
     "@vitest/browser": "^4.1.10",
     "@vitest/browser-playwright": "^4.1.10",
