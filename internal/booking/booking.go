@@ -116,4 +116,7 @@ type CreateParams struct {
 	// Stored on the booking so its reschedule and cancel follow the mode it was created
 	// with, not whatever the event type is set to by then.
 	InviteDelivery string
+	// AllowOverlap (fork) skips the double-booking check: staff booking over a conflict
+	// they were warned about on the Schedule page. Host selection is otherwise unchanged.
+	AllowOverlap bool
 }

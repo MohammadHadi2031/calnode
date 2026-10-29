@@ -475,6 +475,15 @@ func (h *Handler) hostAvailability(ctx context.Context, userID, eventTypeID stri
 	if err := busyRows.Err(); err != nil {
 		return slots.HostAvailability{}, false, err
 	}
+	busyRows.Close() // #nosec G104 -- fully consumed; free the connection for the block query
+	// Fork: unavailable blocks set from the Schedule page are busy too.
+	fromT, _ := time.Parse(time.RFC3339, busyFrom)
+	toT, _ := time.Parse(time.RFC3339, busyTo)
+	blocks, err := h.blocksBetween(ctx, userID, fromT, toT)
+	if err != nil {
+		return slots.HostAvailability{}, false, err
+	}
+	busy = append(busy, blockIntervals(blocks)...)
 
 	// Calnode's own events on this host's calendar also show up in Google free/busy,
 	// but the DB query above is the source of truth for them (§6.2) — so subtract
@@ -514,7 +523,13 @@ func (h *Handler) ownCalendarEvents(ctx context.Context, userID, from, to string
 		  AND (COALESCE(bh.external_event_id, '') != ''
 		       -- fork: an invited seat's copy of the shared event (cleared on cancel)
 		       OR (bh.invited_via_organizer = 1 AND b.status != 'cancelled'))
-		  AND b.start_at < ? AND b.end_at > ?`, userID, to, from)
+		  AND b.start_at < ? AND b.end_at > ?
+		UNION ALL
+		-- fork: an unavailable block's busy event on the host's calendar (the block itself
+		-- is busy in Calnode already)
+		SELECT start_at, end_at FROM unavailable_blocks
+		WHERE user_id = ? AND external_event_id != '' AND start_at < ? AND end_at > ?`,
+		userID, to, from, userID, to, from)
 	if err != nil {
 		return nil, err
 	}

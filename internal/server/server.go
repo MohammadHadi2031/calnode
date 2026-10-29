@@ -447,6 +447,18 @@ func New(ctx context.Context, cfg *config.Config, db *sql.DB, logger *slog.Logge
 	mux.HandleFunc("DELETE /v1/availability-overrides/{id}", h.RequireAuth(h.DeleteAvailabilityOverride))
 	mux.HandleFunc("DELETE /v1/availability-overrides/group/{groupId}", h.RequireAuth(h.DeleteAvailabilityOverrideGroup))
 
+	// Fork: staff Schedule page, unavailable blocks and secretaries (docs/fork-staff-calendar.md).
+	mux.HandleFunc("GET /v1/staff/hosts", h.RequireAuth(h.ListStaffHosts))
+	mux.HandleFunc("GET /v1/staff/calendar", h.RequireAuth(h.GetStaffCalendar))
+	mux.HandleFunc("POST /v1/staff/bookings", h.RequireAuth(h.CreateStaffBooking))
+	mux.HandleFunc("PATCH /v1/staff/bookings/{id}", h.RequireAuth(h.MoveStaffBooking))
+	mux.HandleFunc("POST /v1/staff/bookings/{id}/cancel", h.RequireAuth(h.CancelStaffBooking))
+	mux.HandleFunc("POST /v1/unavailable-blocks", h.RequireAuth(h.CreateUnavailableBlock))
+	mux.HandleFunc("PATCH /v1/unavailable-blocks/{id}", h.RequireAuth(h.UpdateUnavailableBlock))
+	mux.HandleFunc("DELETE /v1/unavailable-blocks/{id}", h.RequireAuth(h.DeleteUnavailableBlock))
+	mux.HandleFunc("GET /v1/secretaries", h.RequireAuth(h.ListSecretaryAssignments))
+	mux.HandleFunc("PUT /v1/users/{id}/secretary-hosts", h.RequireAuth(h.SetSecretaryHosts))
+
 	// Slots — public, rate-limited per IP. Browsed more than booked (so a higher cap
 	// than booking), but each call fans out Google free/busy per host, so leaving it
 	// cors wraps the public booking endpoints so the embeddable widget can call them

@@ -452,7 +452,20 @@ func (h *Handler) filterAvailableHosts(ctx context.Context, et *bookableEventTyp
 // Checks the UTC calendar date on each side of startAt too, since a host's local day
 // can straddle a UTC date boundary (the same reasoning as slots_handler.go's busy-
 // window widening).
+//
+// Fork: an unavailable block (unavailable_blocks, set from the Schedule page) over any
+// part of the range also makes the host unavailable.
 func (h *Handler) hostAvailableAt(ctx context.Context, userID, eventTypeID string, startAt, endAt time.Time) (bool, error) {
+	within, err := h.hostWithinHours(ctx, userID, eventTypeID, startAt, endAt)
+	if err != nil || !within {
+		return false, err
+	}
+	blocked, err := h.hostBlocked(ctx, userID, startAt, endAt)
+	return !blocked, err
+}
+
+// hostWithinHours is hostAvailableAt's working-hours half: rules and date overrides only.
+func (h *Handler) hostWithinHours(ctx context.Context, userID, eventTypeID string, startAt, endAt time.Time) (bool, error) {
 	hostLoc, rules, overrides, err := h.loadHostSchedule(ctx, userID, eventTypeID)
 	if err != nil {
 		return false, err

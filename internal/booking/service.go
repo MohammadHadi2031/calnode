@@ -47,6 +47,12 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*Booking, error) 
 	defer tx.Rollback() //nolint:errcheck
 
 	now := time.Now().UTC().Format(time.RFC3339Nano)
+	busyFor := func(hostID string) (bool, error) {
+		if p.AllowOverlap {
+			return false, nil
+		}
+		return hostBusy(ctx, tx, hostID, startStr, endStr, "")
+	}
 
 	// Select hosts. Round-robin picks one *free* candidate from the rotation pool
 	// per p.RRStrategy (free candidates stay in priority order). Any
@@ -58,7 +64,7 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*Booking, error) 
 	if p.RoutingMode == "round_robin" {
 		// Fixed hosts always attend — all must be free.
 		for _, hostID := range p.RequiredHosts {
-			busy, err := hostBusy(ctx, tx, hostID, startStr, endStr, "")
+			busy, err := busyFor(hostID)
 			if err != nil {
 				return nil, fmt.Errorf("booking: overlap check: %w", err)
 			}
@@ -70,7 +76,7 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*Booking, error) 
 		// Rotation pool — pick exactly one free host by strategy.
 		var free []string
 		for _, hostID := range p.HostIDs {
-			busy, err := hostBusy(ctx, tx, hostID, startStr, endStr, "")
+			busy, err := busyFor(hostID)
 			if err != nil {
 				return nil, fmt.Errorf("booking: overlap check: %w", err)
 			}
@@ -89,7 +95,7 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*Booking, error) 
 		assigned = append(assigned, chosen)
 	} else {
 		for _, hostID := range p.HostIDs {
-			busy, err := hostBusy(ctx, tx, hostID, startStr, endStr, "")
+			busy, err := busyFor(hostID)
 			if err != nil {
 				return nil, fmt.Errorf("booking: overlap check: %w", err)
 			}
@@ -106,7 +112,7 @@ func (s *Service) Create(ctx context.Context, p CreateParams) (*Booking, error) 
 		if slices.Contains(assigned, hostID) {
 			continue
 		}
-		busy, err := hostBusy(ctx, tx, hostID, startStr, endStr, "")
+		busy, err := busyFor(hostID)
 		if err != nil {
 			return nil, fmt.Errorf("booking: optional overlap check: %w", err)
 		}
@@ -497,6 +503,16 @@ func leastLoadedHost(ctx context.Context, tx *sql.Tx, eventTypeID string, candid
 // it is cancelled, and ErrDoubleBooked if the new slot overlaps another
 // confirmed booking for the same host.
 func (s *Service) Reschedule(ctx context.Context, bookingID string, newStart, newEnd time.Time) (*Booking, error) {
+	return s.reschedule(ctx, bookingID, newStart, newEnd, false)
+}
+
+// RescheduleAllowOverlap (fork) moves a booking without the double-booking check: staff
+// moving it over a conflict they were warned about on the Schedule page.
+func (s *Service) RescheduleAllowOverlap(ctx context.Context, bookingID string, newStart, newEnd time.Time) (*Booking, error) {
+	return s.reschedule(ctx, bookingID, newStart, newEnd, true)
+}
+
+func (s *Service) reschedule(ctx context.Context, bookingID string, newStart, newEnd time.Time, allowOverlap bool) (*Booking, error) {
 	startStr := newStart.UTC().Format(time.RFC3339Nano)
 	endStr := newEnd.UTC().Format(time.RFC3339Nano)
 
@@ -535,6 +551,9 @@ func (s *Service) Reschedule(ctx context.Context, bookingID string, newStart, ne
 		hostIDs = []string{b.HostID}
 	}
 	for _, hid := range hostIDs {
+		if allowOverlap {
+			break
+		}
 		busy, err := hostBusy(ctx, tx, hid, startStr, endStr, bookingID)
 		if err != nil {
 			return nil, fmt.Errorf("booking: reschedule overlap: %w", err)

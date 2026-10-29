@@ -138,6 +138,13 @@ func (h *Handler) GetMe(w http.ResponseWriter, r *http.Request) {
 	if user.AvatarURL != "" {
 		out["avatar_url"] = user.AvatarURL
 	}
+	// Fork: the hosts this user is secretary for (docs/fork-staff-calendar.md).
+	secretaryFor, err := h.secretaryHostIDs(r.Context(), user.ID)
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "get me: secretary hosts", "error", err)
+		secretaryFor = []string{}
+	}
+	out["secretary_for"] = secretaryFor
 	h.writeJSON(w, http.StatusOK, out)
 }
 
@@ -348,5 +355,12 @@ func (h *Handler) PatchMe(w http.ResponseWriter, r *http.Request) {
 	if user.AvatarURL != "" {
 		out["avatar_url"] = user.AvatarURL
 	}
+	// Fork: the hosts this user is secretary for (docs/fork-staff-calendar.md).
+	secretaryFor, err := h.secretaryHostIDs(r.Context(), user.ID)
+	if err != nil {
+		h.logger.ErrorContext(r.Context(), "get me: secretary hosts", "error", err)
+		secretaryFor = []string{}
+	}
+	out["secretary_for"] = secretaryFor
 	h.writeJSON(w, http.StatusOK, out)
 }
