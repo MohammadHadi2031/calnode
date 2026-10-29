@@ -6,16 +6,18 @@ import (
 	"net/http"
 )
 
-// SetUserRole handles PATCH /v1/users/{id}/role — owner only.
+// SetUserRole handles PATCH /v1/users/{id}/role — owner or admin.
 //
 // Body: {"role": "admin" | "member"}. Promotes or demotes a user between the
-// member and admin tiers. Per PRD §8.10 only the owner may grant or revoke
-// admin. The owner's own role cannot be changed here (use transfer-ownership),
-// and you cannot change your own role.
+// member and admin tiers. The owner may grant or revoke admin; an admin may
+// promote a member to admin but only the owner may demote another admin (the
+// same rule as archive / password reset, so admins can't strip each other).
+// The owner's own role cannot be changed here (use transfer-ownership), and
+// you cannot change your own role.
 func (h *Handler) SetUserRole(w http.ResponseWriter, r *http.Request) {
 	actor, ok := userFromContext(r.Context())
-	if !ok || !actor.IsOwner {
-		h.writeError(w, http.StatusForbidden, "only the workspace owner can change roles")
+	if !ok || !actor.IsAdmin {
+		h.writeError(w, http.StatusForbidden, "only the workspace owner or an admin can change roles")
 		return
 	}
 	targetID := r.PathValue("id")
@@ -37,9 +39,9 @@ func (h *Handler) SetUserRole(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var targetIsOwner int
+	var targetIsAdmin, targetIsOwner int
 	err := h.db.QueryRowContext(r.Context(),
-		`SELECT is_owner FROM users WHERE id = ?`, targetID).Scan(&targetIsOwner)
+		`SELECT is_admin, is_owner FROM users WHERE id = ?`, targetID).Scan(&targetIsAdmin, &targetIsOwner)
 	if err == sql.ErrNoRows {
 		h.writeError(w, http.StatusNotFound, "user not found")
 		return
@@ -51,6 +53,10 @@ func (h *Handler) SetUserRole(w http.ResponseWriter, r *http.Request) {
 	}
 	if targetIsOwner != 0 {
 		h.writeError(w, http.StatusBadRequest, "cannot change the owner's role; transfer ownership first")
+		return
+	}
+	if targetIsAdmin != 0 && req.Role == "member" && !actor.IsOwner {
+		h.writeError(w, http.StatusForbidden, "only the workspace owner can demote an admin")
 		return
 	}
 

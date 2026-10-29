@@ -7,7 +7,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// PATCH /v1/users/{id}/role  (owner only)
+// PATCH /v1/users/{id}/role  (owner; admins may only promote)
 // ---------------------------------------------------------------------------
 
 func TestSetUserRole_ownerPromotesAndDemotes(t *testing.T) {
@@ -42,20 +42,50 @@ func TestSetUserRole_ownerPromotesAndDemotes(t *testing.T) {
 	}
 }
 
-func TestSetUserRole_requiresOwnerNotAdmin(t *testing.T) {
+func TestSetUserRole_adminPromotesButCannotDemoteAdmin(t *testing.T) {
 	h, database, _, _ := setupWorkspaceWithDB(t)
-	// An admin (not owner) tries to change a role → 403.
 	adminKey := "admin-not-owner-key"
 	database.Exec(`INSERT INTO users (id,email,name,iana_timezone,is_admin,is_owner) VALUES ('u2','a@example.com','Admin','UTC',1,0)`)
 	database.Exec(`INSERT INTO api_keys (id,user_id,name,key_hash,created_at) VALUES ('k2','u2','t',?,'2024-01-01')`, sha256HexForTest(adminKey))
 	database.Exec(`INSERT INTO users (id,email,name,iana_timezone,is_admin) VALUES ('u3','m@example.com','Member','UTC',0)`)
 
+	// Admin promotes a member → allowed.
 	req := authReq(http.MethodPatch, "/v1/users/u3/role", `{"role":"admin"}`, adminKey)
 	req.SetPathValue("id", "u3")
 	rec := httptest.NewRecorder()
 	h.RequireAuth(h.SetUserRole)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin promote member: got %d; want 200 — %s", rec.Code, rec.Body.String())
+	}
+
+	// Admin demotes that (now) admin → 403; only the owner may revoke admin.
+	req = authReq(http.MethodPatch, "/v1/users/u3/role", `{"role":"member"}`, adminKey)
+	req.SetPathValue("id", "u3")
+	rec = httptest.NewRecorder()
+	h.RequireAuth(h.SetUserRole)(rec, req)
 	if rec.Code != http.StatusForbidden {
-		t.Errorf("got %d; want 403 (admin cannot grant admin)", rec.Code)
+		t.Errorf("admin demote admin: got %d; want 403", rec.Code)
+	}
+	var isAdmin int
+	database.QueryRow(`SELECT is_admin FROM users WHERE id='u3'`).Scan(&isAdmin)
+	if isAdmin != 1 {
+		t.Error("u3 should still be admin after a refused demotion")
+	}
+}
+
+func TestSetUserRole_memberForbidden(t *testing.T) {
+	h, database, _, _ := setupWorkspaceWithDB(t)
+	memberKey := "plain-member-key"
+	database.Exec(`INSERT INTO users (id,email,name,iana_timezone,is_admin) VALUES ('u2','m2@example.com','Member2','UTC',0)`)
+	database.Exec(`INSERT INTO api_keys (id,user_id,name,key_hash,created_at) VALUES ('k2','u2','t',?,'2024-01-01')`, sha256HexForTest(memberKey))
+	database.Exec(`INSERT INTO users (id,email,name,iana_timezone,is_admin) VALUES ('u3','m3@example.com','Member3','UTC',0)`)
+
+	req := authReq(http.MethodPatch, "/v1/users/u3/role", `{"role":"admin"}`, memberKey)
+	req.SetPathValue("id", "u3")
+	rec := httptest.NewRecorder()
+	h.RequireAuth(h.SetUserRole)(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("got %d; want 403 (member cannot change roles)", rec.Code)
 	}
 }
 

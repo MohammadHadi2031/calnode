@@ -30,12 +30,14 @@
 	let confirmTitle = $state('');
 	let confirmDescription = $state('');
 	let confirmActionText = $state('Confirm');
+	let confirmDestructive = $state(true);
 	let pendingAction: (() => void) | null = null;
 
-	function openConfirm(opts: { title: string; description: string; confirmText: string; action: () => void }) {
+	function openConfirm(opts: { title: string; description: string; confirmText: string; action: () => void; destructive?: boolean }) {
 		confirmTitle = opts.title;
 		confirmDescription = opts.description;
 		confirmActionText = opts.confirmText;
+		confirmDestructive = opts.destructive ?? true;
 		pendingAction = opts.action;
 		confirmOpen = true;
 	}
@@ -135,7 +137,36 @@
 		}
 	}
 
-	// --- Role management (owner only) ---
+	// --- Role management ---
+	// The owner can promote/demote anyone but themselves; an admin can promote a
+	// member to admin but not demote another admin (mirrors SetUserRole).
+	function canChangeRole(m: TeamMember) {
+		const me = $currentUser;
+		if (!me?.is_admin || m.archived || m.is_owner || m.id === me.id) return false;
+		return !m.is_admin || me.is_owner;
+	}
+
+	// Bumped after every pick so the role Select re-renders from m.role — a
+	// cancelled confirm or failed request must not leave the new value showing.
+	let roleRev = $state(0);
+
+	function pickRole(m: TeamMember, role: string) {
+		roleRev++;
+		if (role !== 'admin' && role !== 'member') return;
+		if (role === m.role) return;
+		if (role === 'admin' && !$currentUser?.is_owner) {
+			openConfirm({
+				title: `Make ${m.name} an admin?`,
+				description: 'Admins can manage members, teams, and every booking. Only the workspace owner can demote an admin later.',
+				confirmText: 'Make admin',
+				destructive: false,
+				action: () => setRole(m, 'admin')
+			});
+			return;
+		}
+		setRole(m, role);
+	}
+
 	async function setRole(m: TeamMember, role: 'admin' | 'member') {
 		try {
 			await api.patch(`/v1/users/${m.id}/role`, { role });
@@ -286,7 +317,7 @@
 	title={confirmTitle}
 	description={confirmDescription}
 	confirmText={confirmActionText}
-	destructive
+	destructive={confirmDestructive}
 	onConfirm={() => pendingAction?.()}
 />
 
@@ -460,7 +491,21 @@
 								</td>
 								<td class="px-4 py-3">
 									<div class="flex items-center gap-1.5">
-										<Badge variant={roleVariant(m)}>{roleLabel(m)}</Badge>
+										{#if canChangeRole(m)}
+											{#key roleRev}
+												<Select.Root type="single" value={m.role} onValueChange={(v) => pickRole(m, v)}>
+													<Select.Trigger size="sm" class="h-7 min-w-24 text-xs" aria-label="Change role for {m.name}">
+														{roleLabel(m)}
+													</Select.Trigger>
+													<Select.Content>
+														<Select.Item value="member" label="Member">Member</Select.Item>
+														<Select.Item value="admin" label="Admin">Admin</Select.Item>
+													</Select.Content>
+												</Select.Root>
+											{/key}
+										{:else}
+											<Badge variant={roleVariant(m)}>{roleLabel(m)}</Badge>
+										{/if}
 										{#if m.archived}<Badge variant="outline" class="text-xs text-muted-foreground">Archived</Badge>{/if}
 									</div>
 								</td>
@@ -516,11 +561,6 @@
 													</div>
 												{:else}
 													{#if $currentUser.is_owner && !m.is_owner}
-														{#if m.is_admin}
-															<Button size="sm" variant="ghost" class="h-7 text-xs" onclick={() => setRole(m, 'member')}>Make member</Button>
-														{:else}
-															<Button size="sm" variant="ghost" class="h-7 text-xs" onclick={() => setRole(m, 'admin')}>Make admin</Button>
-														{/if}
 														<Button size="sm" variant="ghost" class="h-7 text-xs" onclick={() => confirmTransfer(m)}>Transfer ownership</Button>
 													{/if}
 													<!-- Reset password + Archive only on members this viewer may manage:
