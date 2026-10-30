@@ -1123,7 +1123,7 @@ func (h *Handler) hostPrefsOrDefault(ctx context.Context, bookingID, userID stri
 // reads correctly), the host's own invite (applyHostInvite), and the ICS sequence number.
 func (h *Handler) hostBookingData(ctx context.Context, base mailer.BookingData, host assignedHost, inviteMode string, updatedAt time.Time) mailer.BookingData {
 	hd := base
-	hd.HostName, hd.HostEmail = host.Name, host.Email
+	hd.HostName, hd.HostEmail, hd.HostTimezone = host.Name, host.Email, host.IANATimezone
 	h.applyHostInvite(ctx, &hd, inviteMode, host.UserID)
 	hd.ICSSequence = int(updatedAt.Unix())
 	return hd
@@ -2161,6 +2161,9 @@ type assignedHost struct {
 	// InvitedViaOrganizer: this seat holds no event of its own; the host is an attendee
 	// of the booking's shared event on another host's calendar (migration 90001).
 	InvitedViaOrganizer bool
+	// IANATimezone is the host's own zone (users.iana_timezone): their emails show times
+	// in it (wisegrid fork, docs/fork-email-timezones.md).
+	IANATimezone string
 }
 
 // assignedHosts returns every host attending a booking, primary first. Group
@@ -2172,7 +2175,7 @@ func (h *Handler) assignedHosts(ctx context.Context, bookingID string) ([]assign
 	rows, err := h.db.QueryContext(ctx, `
 		SELECT bh.user_id, u.name, u.email, bh.is_primary, COALESCE(bh.external_event_id, ''),
 		       COALESCE(bh.external_calendar_id, ''), COALESCE(bh.external_provider, ''),
-		       bh.invited_via_organizer
+		       bh.invited_via_organizer, COALESCE(u.iana_timezone, '')
 		FROM booking_hosts bh JOIN users u ON u.id = bh.user_id
 		WHERE bh.booking_id = ?
 		ORDER BY bh.is_primary DESC, u.name ASC`, bookingID)
@@ -2184,7 +2187,7 @@ func (h *Handler) assignedHosts(ctx context.Context, bookingID string) ([]assign
 	for rows.Next() {
 		var a assignedHost
 		var primary int
-		if err := rows.Scan(&a.UserID, &a.Name, &a.Email, &primary, &a.ExternalEventID, &a.ExternalCalendarID, &a.ExternalProvider, &a.InvitedViaOrganizer); err != nil {
+		if err := rows.Scan(&a.UserID, &a.Name, &a.Email, &primary, &a.ExternalEventID, &a.ExternalCalendarID, &a.ExternalProvider, &a.InvitedViaOrganizer, &a.IANATimezone); err != nil {
 			return nil, err
 		}
 		a.IsPrimary = primary != 0
@@ -2230,11 +2233,11 @@ func primaryHost(hosts []assignedHost) assignedHost {
 	return hosts[0]
 }
 
-// loadHostIntoData fills HostName and HostEmail in d from the users table.
+// loadHostIntoData fills HostName, HostEmail and HostTimezone in d from the users table.
 func (h *Handler) loadHostIntoData(ctx context.Context, hostID string, d *mailer.BookingData) error {
 	return h.db.QueryRowContext(ctx,
-		`SELECT name, email FROM users WHERE id = ?`, hostID).
-		Scan(&d.HostName, &d.HostEmail)
+		`SELECT name, email, COALESCE(iana_timezone, '') FROM users WHERE id = ?`, hostID).
+		Scan(&d.HostName, &d.HostEmail, &d.HostTimezone)
 }
 
 // loadCancellationData assembles all fields needed for cancellation emails.

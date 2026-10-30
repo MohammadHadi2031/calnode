@@ -357,7 +357,7 @@ func (h *Handler) rescheduleSideEffects(bCopy booking.Booking, capturedEtID stri
 			continue
 		}
 		hd := d
-		hd.HostName, hd.HostEmail = host.Name, host.Email
+		hd.HostName, hd.HostEmail, hd.HostTimezone = host.Name, host.Email, host.IANATimezone
 		h.applyHostInvite(ctx, &hd, bCopy.InviteDelivery, host.UserID)
 		if host.InvitedViaOrganizer && providerInvites {
 			hd.AttachICS = false // the shared event's update reached them from the provider

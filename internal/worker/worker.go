@@ -398,7 +398,7 @@ func (w *Worker) sendReminder(ctx context.Context, payload string) error {
 	}
 	for _, host := range hosts {
 		hd := d
-		hd.HostName, hd.HostEmail = host.Name, host.Email
+		hd.HostName, hd.HostEmail, hd.HostTimezone = host.Name, host.Email, host.timezone
 		if err := mailer.SendReminderToHost(ctx, w.mailer, hd); err != nil {
 			w.logger.Error("worker: reminder: send to host", "error", err, "booking_id", p.BookingID)
 		}
@@ -426,12 +426,17 @@ func (w *Worker) reminderGuests(ctx context.Context, bookingID string) ([]mailer
 	return out, rows.Err()
 }
 
+// reminderHost is one host to remind, with the zone their email shows times in.
+type reminderHost struct {
+	Name, Email, timezone string
+}
+
 // reminderHosts returns the hosts attending the booking who want their own reminder
 // (users.notify_host_reminder), primary first. Read whole before any send: the pool has
 // a single connection.
-func (w *Worker) reminderHosts(ctx context.Context, bookingID string) ([]mailer.Invitee, error) {
+func (w *Worker) reminderHosts(ctx context.Context, bookingID string) ([]reminderHost, error) {
 	rows, err := w.db.QueryContext(ctx, `
-		SELECT u.name, u.email FROM booking_hosts bh
+		SELECT u.name, u.email, COALESCE(u.iana_timezone, '') FROM booking_hosts bh
 		JOIN users u ON u.id = bh.user_id
 		WHERE bh.booking_id = ? AND u.notify_host_reminder = 1 AND u.archived_at IS NULL
 		ORDER BY bh.is_primary DESC, bh.rowid`, bookingID)
@@ -439,10 +444,10 @@ func (w *Worker) reminderHosts(ctx context.Context, bookingID string) ([]mailer.
 		return nil, err
 	}
 	defer rows.Close()
-	var out []mailer.Invitee
+	var out []reminderHost
 	for rows.Next() {
-		var h mailer.Invitee
-		if err := rows.Scan(&h.Name, &h.Email); err != nil {
+		var h reminderHost
+		if err := rows.Scan(&h.Name, &h.Email, &h.timezone); err != nil {
 			return nil, err
 		}
 		out = append(out, h)

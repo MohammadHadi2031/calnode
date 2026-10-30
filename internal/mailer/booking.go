@@ -23,6 +23,11 @@ type BookingData struct {
 	OrganizerName     string
 	OrganizerEmail    string
 	OrganizerTimezone string
+	// HostTimezone is the host's own zone (users.iana_timezone), for host emails: they show
+	// times in it, with the booker's alongside. hostView marks a host email; the Send*ToHost
+	// helpers set it.
+	HostTimezone string
+	hostView     bool
 	// Guests are the booking's other invitees, listed as ATTENDEEs on the .ics so every
 	// copy describes the same meeting. ForGuest builds a guest's own copy.
 	Guests             []Invitee
@@ -138,33 +143,104 @@ func (d BookingData) BannerOpacityCSS() string {
 	return strconv.FormatFloat(float64(o)/100, 'f', -1, 64)
 }
 
-// WhenFmt renders the booking time as a single human line in the organizer's timezone and
-// resolved locale, e.g. "Mon 22 Jun 2026, 9:00 AM – 9:20 AM NZST" (English) or
-// "lun 22 jun 2026, 21:00 – 21:20 NZST" (Spanish, 24h clock).
+// WhenFmt renders the booking time as one line in the reader's zone, with a second zone
+// alongside (see zones), e.g. "Thu 1 Oct 2026, 7:30 PM – 8:00 PM Tehran (4:00 PM – 4:30 PM
+// UTC)". The second zone carries its own date when the day differs there.
 func (d BookingData) WhenFmt() string {
-	tzLoc, err := time.LoadLocation(d.OrganizerTimezone)
-	if err != nil {
-		tzLoc = time.UTC
-	}
 	l := d.locale()
-	start, end := d.StartAt.In(tzLoc), d.EndAt.In(tzLoc)
-	return l.FormatDateTime(start) + " – " + l.FormatTimeOfDay(end) + " " + end.Format("MST")
+	p, sec := d.zones()
+	start, end := d.StartAt.In(p), d.EndAt.In(p)
+	out := l.FormatDateTime(start) + " – " + l.FormatTimeOfDay(end) + " " + zoneName(p)
+	if sec != nil && !sameOffset(d.StartAt, p, sec) {
+		s2, e2 := d.StartAt.In(sec), d.EndAt.In(sec)
+		first := l.FormatTimeOfDay(s2)
+		if s2.YearDay() != start.YearDay() || s2.Year() != start.Year() {
+			first = l.FormatDateTime(s2)
+		}
+		out += " (" + first + " – " + l.FormatTimeOfDay(e2) + " " + zoneName(sec) + ")"
+	}
+	return out
 }
 
-// StartFmt returns StartAt formatted in the organizer's timezone and resolved locale.
-func (d BookingData) StartFmt() string { return inTZ(d.StartAt, d.OrganizerTimezone, d.locale()) }
+// StartFmt returns StartAt in the reader's zone, with the second zone alongside.
+func (d BookingData) StartFmt() string { return d.fmtAt(d.StartAt) }
 
-// EndFmt returns EndAt formatted in the organizer's timezone and resolved locale.
-func (d BookingData) EndFmt() string { return inTZ(d.EndAt, d.OrganizerTimezone, d.locale()) }
+// EndFmt returns EndAt in the reader's zone, with the second zone alongside.
+func (d BookingData) EndFmt() string { return d.fmtAt(d.EndAt) }
 
-// PreviousStartFmt returns PreviousStartAt formatted in the organizer's timezone and locale.
-func (d BookingData) PreviousStartFmt() string {
-	return inTZ(d.PreviousStartAt, d.OrganizerTimezone, d.locale())
+// PreviousStartFmt returns PreviousStartAt like StartFmt.
+func (d BookingData) PreviousStartFmt() string { return d.fmtAt(d.PreviousStartAt) }
+
+// PreviousEndFmt returns PreviousEndAt like EndFmt.
+func (d BookingData) PreviousEndFmt() string { return d.fmtAt(d.PreviousEndAt) }
+
+// fmtAt renders t as "<date>, <time> <zone> (<time> <second zone>)".
+func (d BookingData) fmtAt(t time.Time) string {
+	l := d.locale()
+	p, sec := d.zones()
+	tp := t.In(p)
+	out := l.FormatDateTime(tp) + " " + zoneName(p)
+	if sec != nil && !sameOffset(t, p, sec) {
+		ts := t.In(sec)
+		other := l.FormatTimeOfDay(ts)
+		if ts.YearDay() != tp.YearDay() || ts.Year() != tp.Year() {
+			other = l.FormatDateTime(ts)
+		}
+		out += " (" + other + " " + zoneName(sec) + ")"
+	}
+	return out
 }
 
-// PreviousEndFmt returns PreviousEndAt formatted in the organizer's timezone and locale.
-func (d BookingData) PreviousEndFmt() string {
-	return inTZ(d.PreviousEndAt, d.OrganizerTimezone, d.locale())
+// zones returns the zone an email's times are written in and the zone shown alongside it
+// (nil for none) - wisegrid fork, docs/fork-email-timezones.md. The booker and guests
+// read their own zone with UTC beside it, the reference staff coordinate in; a host reads
+// their own zone with the booker's beside it, so neither side converts by hand. A host
+// whose zone is unknown reads the booker's, with UTC.
+func (d BookingData) zones() (primary, secondary *time.Location) {
+	booker := loadZone(d.OrganizerTimezone)
+	if d.hostView {
+		if host := loadZone(d.HostTimezone); d.HostTimezone != "" && host != nil {
+			return host, booker
+		}
+	}
+	return booker, time.UTC
+}
+
+// loadZone resolves an IANA zone, falling back to UTC for "" or an unknown name. Go
+// resolves each instant with that instant's own offset, so DST on either side of a
+// booking - or between booking and meeting - comes out right.
+func loadZone(name string) *time.Location {
+	if name == "" {
+		return time.UTC
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}
+
+// zoneName labels a zone for a reader: "UTC", or the city of its IANA name ("Asia/Tehran"
+// is "Tehran", "America/New_York" is "New York"). Abbreviations are not used: Go has none
+// for many zones (Tehran, Istanbul, Amman print as "+0330", "+03"), and the city is what
+// the people on these calls know each other by.
+func zoneName(loc *time.Location) string {
+	name := loc.String()
+	if name == "" || name == "UTC" || name == "Local" || name == "Etc/UTC" {
+		return "UTC"
+	}
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		name = name[i+1:]
+	}
+	return strings.ReplaceAll(name, "_", " ")
+}
+
+// sameOffset reports whether a and b show the same wall-clock time at t, in which case a
+// second zone would only repeat the first.
+func sameOffset(t time.Time, a, b *time.Location) bool {
+	_, oa := t.In(a).Zone()
+	_, ob := t.In(b).Zone()
+	return oa == ob
 }
 
 // subjectOr returns the custom subject override when set, else the default.
@@ -175,14 +251,6 @@ func (d BookingData) subjectOr(def string) string {
 	return def
 }
 
-func inTZ(t time.Time, tz string, l *i18n.Locale) string {
-	tzLoc, err := time.LoadLocation(tz)
-	if err != nil {
-		tzLoc = time.UTC
-	}
-	tt := t.In(tzLoc)
-	return l.FormatDateTime(tt) + " " + tt.Format("MST")
-}
 
 // calDetails is the shared "add to calendar" description for the link builders.
 func (d BookingData) calDetails() string {
@@ -249,6 +317,7 @@ func SendConfirmationToHost(ctx context.Context, m Mailer, d BookingData) error 
 	}
 	d.HideManageLink = true
 	d.Locale = nil // host emails stay English regardless of the attendee's locale — see BookingData.Locale
+	d.hostView = true
 	msg := Message{
 		To:      []string{d.HostEmail},
 		Subject: "New booking: " + d.EventTypeName + " with " + d.OrganizerName,
@@ -310,6 +379,7 @@ func SendCancellationToHost(ctx context.Context, m Mailer, d BookingData) error 
 	}
 	d.HideManageLink = true
 	d.Locale = nil // host emails stay English regardless of the attendee's locale — see BookingData.Locale
+	d.hostView = true
 	msg := Message{
 		To:      []string{d.HostEmail},
 		Subject: "Booking cancelled: " + d.EventTypeName + " with " + d.OrganizerName,
@@ -369,6 +439,7 @@ func SendRescheduleToHost(ctx context.Context, m Mailer, d BookingData) error {
 	}
 	d.HideManageLink = true
 	d.Locale = nil // host emails stay English regardless of the attendee's locale — see BookingData.Locale
+	d.hostView = true
 	msg := Message{
 		To:      []string{d.HostEmail},
 		Subject: "Booking rescheduled: " + d.EventTypeName + " with " + d.OrganizerName,
@@ -424,6 +495,7 @@ func SendReminderToHost(ctx context.Context, m Mailer, d BookingData) error {
 	}
 	d.HideManageLink = true
 	d.Locale = nil // host emails stay English regardless of the attendee's locale — see BookingData.Locale
+	d.hostView = true
 	if err := m.Send(ctx, Message{
 		To:      []string{d.HostEmail},
 		Subject: "Reminder: " + d.EventTypeName + " with " + d.OrganizerName,
