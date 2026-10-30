@@ -139,6 +139,8 @@ func BuildHandler(ctx context.Context, cfg *config.Config, db *sql.DB, logger *s
 	}
 
 	h.SetMailer(live, cfg.BaseURL)
+	// Record every booking email attempt per booking (fork: docs/fork-email-log.md).
+	live.SetObserver(h.EmailLogObserver())
 
 	drain := func() {}
 	whs, err := webhook.New(db, cfg.EncryptionKey)
@@ -157,6 +159,7 @@ func BuildHandler(ctx context.Context, cfg *config.Config, db *sql.DB, logger *s
 		// Notetaker jobs live in the handler package (they need LLM/S3/encKey).
 		wrk.RegisterHandler("notetaker.transcribe", h.JobNotetakerTranscribe)
 		wrk.RegisterHandler("notetaker.summarize", h.JobNotetakerSummarize)
+		wrk.RegisterHandler("email.alert", h.JobEmailAlert)
 		go wrk.Run(ctx)
 		drain = wrk.Wait
 		logger.Info("webhook worker started")
@@ -486,6 +489,8 @@ func New(ctx context.Context, cfg *config.Config, db *sql.DB, logger *slog.Logge
 	mux.HandleFunc("PATCH /v1/bookings/{id}/reschedule", h.RequireAuth(h.RescheduleBooking))
 	mux.HandleFunc("POST /v1/bookings/{id}/reassign", h.RequireAuth(h.ReassignBooking))
 	mux.HandleFunc("GET /v1/bookings/{id}/answers", h.RequireAuth(h.GetBookingAnswers))
+	mux.HandleFunc("GET /v1/bookings/{id}/emails", h.RequireAuth(h.ListBookingEmails))
+	mux.HandleFunc("POST /v1/bookings/{id}/resend-confirmation", h.RequireAuth(h.ResendConfirmation))
 
 	// Public booking page
 	mux.HandleFunc("GET /embed.js", h.EmbedJS)

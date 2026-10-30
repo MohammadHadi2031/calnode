@@ -79,8 +79,8 @@ func TestEnsureResendInboundWebhook_createsWhenMissing(t *testing.T) {
 	if secret != "whsec_new" || !created {
 		t.Errorf("got secret %q created %v; want the new webhook's secret", secret, created)
 	}
-	if f.created["endpoint"] != inboundURL || !slices.Equal(toStrings(f.created["events"]), []string{"email.received"}) {
-		t.Errorf("created webhook = %v; want our endpoint subscribed to email.received", f.created)
+	if f.created["endpoint"] != inboundURL || !slices.Equal(toStrings(f.created["events"]), []string{"email.received", "email.bounced"}) {
+		t.Errorf("created webhook = %v; want our endpoint subscribed to email.received and email.bounced", f.created)
 	}
 }
 

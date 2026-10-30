@@ -56,6 +56,11 @@ const (
 	FieldAmountPaid      = "amount_paid_cents"
 	FieldCurrency        = "amount_paid_currency"
 	FieldRSVPStatus      = "rsvp_status"
+	// Set on booking.email_failed only (wisegrid fork, see docs/fork-email-log.md).
+	FieldEmailKind      = "email_kind"
+	FieldEmailStatus    = "email_status"
+	FieldEmailError     = "email_error"
+	FieldEmailRecipient = "email_recipient"
 )
 
 // AllFields is every selectable field, in payload order. Used to validate config
@@ -67,6 +72,7 @@ var AllFields = []string{
 	FieldHostID, FieldHostName, FieldHostEmail,
 	FieldAttendeeName, FieldAttendeeEmail, FieldAttendeeTZ, FieldAnswers,
 	FieldPaymentStatus, FieldAmountPaid, FieldCurrency, FieldRSVPStatus,
+	FieldEmailKind, FieldEmailStatus, FieldEmailError, FieldEmailRecipient,
 }
 
 // defaultFields reproduces the original payload (no PII, no answers) so a webhook with no
@@ -77,6 +83,7 @@ var defaultFields = []string{
 	FieldStatus, FieldLocation, FieldCancelReason, FieldCreatedAt,
 	FieldPreviousStartAt, FieldPreviousEndAt,
 	FieldPaymentStatus, FieldAmountPaid, FieldCurrency, FieldRSVPStatus,
+	FieldEmailKind, FieldEmailStatus, FieldEmailError, // not the recipient: it is PII
 }
 
 var validField = func() map[string]bool {
@@ -129,6 +136,12 @@ type BookingPayload struct {
 	// RSVPStatus is the booker's answer to a Calnode-sent invite (accepted, declined,
 	// tentative); set on booking.rsvp only.
 	RSVPStatus string `json:"rsvp_status,omitempty"`
+	// The undelivered email (kind: confirmation, reminder, ...; status: failed or
+	// bounced); set on booking.email_failed only.
+	EmailKind      string `json:"email_kind,omitempty"`
+	EmailStatus    string `json:"email_status,omitempty"`
+	EmailError     string `json:"email_error,omitempty"`
+	EmailRecipient string `json:"email_recipient,omitempty"`
 }
 
 type Service struct {
@@ -351,6 +364,10 @@ func buildData(bd enrichedBooking, fields []string) map[string]any {
 		FieldPaymentStatus:   bd.core.PaymentStatus,
 		FieldCurrency:        bd.core.AmountPaidCurrency,
 		FieldRSVPStatus:      bd.core.RSVPStatus,
+		FieldEmailKind:       bd.core.EmailKind,
+		FieldEmailStatus:     bd.core.EmailStatus,
+		FieldEmailError:      bd.core.EmailError,
+		FieldEmailRecipient:  bd.core.EmailRecipient,
 	}
 	out := make(map[string]any, len(fields))
 	for _, f := range fields {
@@ -369,9 +386,15 @@ func buildData(bd enrichedBooking, fields []string) map[string]any {
 // and creates a webhook_deliveries + jobs row pair for each. Failures are
 // soft-errors (caller logs; a booking is already committed).
 func (s *Service) Enqueue(ctx context.Context, event string, p BookingPayload) error {
+	return s.EnqueueFor(ctx, p.HostID, event, p)
+}
+
+// EnqueueFor is Enqueue for the webhooks of userID rather than of p.HostID, for events
+// someone other than the host must hear about (an undelivered email reaches the owner).
+func (s *Service) EnqueueFor(ctx context.Context, userID, event string, p BookingPayload) error {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, events, fields FROM webhooks
-		WHERE user_id = ? AND is_active = 1`, p.HostID)
+		WHERE user_id = ? AND is_active = 1`, userID)
 	if err != nil {
 		return fmt.Errorf("webhook: list for enqueue: %w", err)
 	}

@@ -19,6 +19,7 @@
 		'booking.cancelled',
 		'booking.rescheduled',
 		'booking.rsvp',
+		'booking.email_failed',
 		'recording.completed',
 		'transcript.ready',
 		'notes.ready'
@@ -61,6 +62,12 @@
 		] },
 		{ group: 'Intake', pii: true, fields: [
 			{ key: 'answers', label: 'Intake answers', pii: true },
+		] },
+		{ group: 'Undelivered email (booking.email_failed)', fields: [
+			{ key: 'email_kind', label: 'Email type' },
+			{ key: 'email_status', label: 'Delivery status' },
+			{ key: 'email_error', label: 'Error' },
+			{ key: 'email_recipient', label: 'Recipient address', pii: true },
 		] },
 	];
 	const allFieldKeys = fieldGroups.flatMap((g) => g.fields.map((f) => f.key));

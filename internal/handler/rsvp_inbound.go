@@ -142,6 +142,29 @@ func (h *Handler) InboundEmailResend(w http.ResponseWriter, r *http.Request) {
 	ignore := func(reason string) {
 		h.writeJSON(w, http.StatusOK, map[string]string{"ignored": reason})
 	}
+	if ev.Type == "email.bounced" {
+		// Same signed endpoint; marks the logged attempt (see email_log.go).
+		var bounced struct {
+			Data struct {
+				Bounce struct {
+					Message string `json:"message"`
+				} `json:"bounce"`
+			} `json:"data"`
+		}
+		_ = json.Unmarshal(body, &bounced)
+		matched, err := h.recordEmailBounce(ctx, ev.Data.EmailID, bounced.Data.Bounce.Message)
+		if err != nil {
+			h.logger.ErrorContext(ctx, "inbound email: record bounce", "error", err)
+			h.writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if !matched {
+			ignore("bounce is not for a logged booking email")
+			return
+		}
+		h.writeJSON(w, http.StatusOK, map[string]string{"recorded": "bounced"})
+		return
+	}
 	if ev.Type != "email.received" {
 		ignore("not an email.received event")
 		return

@@ -71,8 +71,20 @@ func resendAPI(ctx context.Context, apiKey, method, path string, body, out any) 
 	return json.Unmarshal(data, out)
 }
 
-// inboundWebhookEvent is the only event RSVP tracking subscribes to.
-const inboundWebhookEvent = "email.received"
+// inboundWebhookEvents are the events the instance's Resend webhook subscribes to: replies
+// for RSVP tracking, and bounces for the booking email log (wisegrid fork).
+var inboundWebhookEvents = []string{"email.received", "email.bounced"}
+
+// missingEvents returns the inboundWebhookEvents not in have.
+func missingEvents(have []string) []string {
+	var out []string
+	for _, e := range inboundWebhookEvents {
+		if !slices.Contains(have, e) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
 
 // EnsureResendInboundWebhook makes sure Resend delivers email.received events to endpoint
 // and returns that webhook's signing secret. An existing webhook for the same endpoint is
@@ -99,11 +111,8 @@ func EnsureResendInboundWebhook(ctx context.Context, apiKey, endpoint string) (s
 		if wh.Endpoint != endpoint {
 			continue
 		}
-		if !slices.Contains(wh.Events, inboundWebhookEvent) || wh.Status != "enabled" {
-			events := wh.Events
-			if !slices.Contains(events, inboundWebhookEvent) {
-				events = append(slices.Clone(events), inboundWebhookEvent)
-			}
+		if missing := missingEvents(wh.Events); len(missing) > 0 || wh.Status != "enabled" {
+			events := append(slices.Clone(wh.Events), missing...)
 			update := map[string]any{"events": events, "status": "enabled"}
 			if err := resendAPI(ctx, apiKey, http.MethodPatch, "/webhooks/"+url.PathEscape(wh.ID), update, nil); err != nil {
 				return "", false, fmt.Errorf("update webhook: %w", err)
@@ -118,7 +127,7 @@ func EnsureResendInboundWebhook(ctx context.Context, apiKey, endpoint string) (s
 		return got.SigningSecret, false, nil
 	}
 
-	create := map[string]any{"endpoint": endpoint, "events": []string{inboundWebhookEvent}}
+	create := map[string]any{"endpoint": endpoint, "events": inboundWebhookEvents}
 	if err := resendAPI(ctx, apiKey, http.MethodPost, "/webhooks", create, &got); err != nil {
 		return "", false, fmt.Errorf("create webhook: %w", err)
 	}

@@ -120,6 +120,21 @@ export type Booking = {
 	amount_paid_currency?: string;
 	/** The booker's RSVP to a Calnode-sent invite; absent until an answer arrives. */
 	rsvp_status?: 'accepted' | 'declined' | 'tentative';
+	/** The booker's confirmation was not delivered (failed after retry, or bounced). */
+	confirm_failed?: boolean;
+};
+
+/** One logged attempt at a booking email (GET /v1/bookings/{id}/emails). */
+export type BookingEmail = {
+	id: string;
+	kind: 'confirmation' | 'cancellation' | 'reschedule' | 'reminder';
+	role: 'attendee' | 'guest' | 'host';
+	recipient: string;
+	subject: string;
+	status: 'queued' | 'sent' | 'failed' | 'bounced';
+	error?: string;
+	created_at: string;
+	updated_at: string;
 };
 
 export type APIKey = {
