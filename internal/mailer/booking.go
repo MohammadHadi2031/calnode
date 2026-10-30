@@ -251,7 +251,6 @@ func (d BookingData) subjectOr(def string) string {
 	return def
 }
 
-
 // calDetails is the shared "add to calendar" description for the link builders.
 func (d BookingData) calDetails() string {
 	s := d.Tf("email_booking_with", d.HostName)
