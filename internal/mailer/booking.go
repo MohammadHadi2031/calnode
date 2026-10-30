@@ -69,6 +69,9 @@ type BookingData struct {
 	// emails. Set for host notifications — the manage token is the attendee's
 	// self-serve link, not something the host should action from email.
 	HideManageLink bool
+	// IsGuest marks a guest's own copy (ForGuest), so the email log can tell it from the
+	// booker's.
+	IsGuest bool
 	// Locale drives T/Tf and all date/time formatting below — the attendee's stored
 	// booking_attendees.locale at send time, resolved by the caller. nil (the zero
 	// value) falls back to English via locale(). Host-facing sends (SendConfirmationToHost
@@ -222,6 +225,7 @@ func (d BookingData) OutlookCalURL() string {
 
 // SendConfirmationToAttendee sends a booking confirmation email to the organizer/attendee.
 func SendConfirmationToAttendee(ctx context.Context, m Mailer, d BookingData) error {
+	ctx = d.attendeeTag(ctx, "confirmation")
 	msg := Message{
 		To:      []string{d.OrganizerEmail},
 		Subject: d.subjectOr(d.Tf("email_subject_confirmed", d.EventTypeName)),
@@ -239,6 +243,7 @@ func SendConfirmationToAttendee(ctx context.Context, m Mailer, d BookingData) er
 
 // SendConfirmationToHost sends a new-booking notification email to the host.
 func SendConfirmationToHost(ctx context.Context, m Mailer, d BookingData) error {
+	ctx = d.hostTag(ctx, "confirmation")
 	if d.HostEmail == "" {
 		return nil
 	}
@@ -278,6 +283,7 @@ func SendConfirmation(ctx context.Context, m Mailer, d BookingData) error {
 
 // SendCancellationToAttendee sends a cancellation notification to the organizer/attendee.
 func SendCancellationToAttendee(ctx context.Context, m Mailer, d BookingData) error {
+	ctx = d.attendeeTag(ctx, "cancellation")
 	if d.OrganizerEmail == "" {
 		return nil
 	}
@@ -298,6 +304,7 @@ func SendCancellationToAttendee(ctx context.Context, m Mailer, d BookingData) er
 
 // SendCancellationToHost sends a cancellation notification to the host.
 func SendCancellationToHost(ctx context.Context, m Mailer, d BookingData) error {
+	ctx = d.hostTag(ctx, "cancellation")
 	if d.HostEmail == "" {
 		return nil
 	}
@@ -338,6 +345,7 @@ func SendCancellation(ctx context.Context, m Mailer, d BookingData) error {
 // SendRescheduleToAttendee sends a reschedule notification to the organizer/attendee.
 // d.PreviousStartAt / PreviousEndAt must be set to the old times.
 func SendRescheduleToAttendee(ctx context.Context, m Mailer, d BookingData) error {
+	ctx = d.attendeeTag(ctx, "reschedule")
 	msg := Message{
 		To:      []string{d.OrganizerEmail},
 		Subject: d.subjectOr(d.Tf("email_subject_rescheduled", d.EventTypeName)),
@@ -355,6 +363,7 @@ func SendRescheduleToAttendee(ctx context.Context, m Mailer, d BookingData) erro
 
 // SendRescheduleToHost sends a reschedule notification to the host.
 func SendRescheduleToHost(ctx context.Context, m Mailer, d BookingData) error {
+	ctx = d.hostTag(ctx, "reschedule")
 	if d.HostEmail == "" {
 		return nil
 	}
@@ -394,6 +403,7 @@ func SendReschedule(ctx context.Context, m Mailer, d BookingData) error {
 
 // SendReminder sends a reminder email to the organizer.
 func SendReminder(ctx context.Context, m Mailer, d BookingData) error {
+	ctx = d.attendeeTag(ctx, "reminder")
 	if err := m.Send(ctx, Message{
 		To:      []string{d.OrganizerEmail},
 		Subject: d.subjectOr(d.Tf("email_subject_reminder", d.EventTypeName)),
@@ -610,5 +620,6 @@ func (d BookingData) ForGuest(g Invitee) BookingData {
 	}
 	gd.ManageURL = ""
 	gd.HideManageLink = true
+	gd.IsGuest = true
 	return gd
 }

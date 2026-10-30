@@ -77,8 +77,15 @@ type resendPayload struct {
 
 // Send delivers msg through the Resend API.
 func (r *Resend) Send(ctx context.Context, msg Message) error {
+	_, err := r.SendID(ctx, msg)
+	return err
+}
+
+// SendID delivers msg through the Resend API and returns Resend's id for it, which is
+// what a later email.bounced webhook refers to.
+func (r *Resend) SendID(ctx context.Context, msg Message) (string, error) {
 	if r.apiKey == "" {
-		return errors.New("mailer: resend api key not configured")
+		return "", errors.New("mailer: resend api key not configured")
 	}
 
 	from := mail.Address{Name: r.fromName, Address: r.from}
@@ -110,12 +117,12 @@ func (r *Resend) Send(ctx context.Context, msg Message) error {
 
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return fmt.Errorf("mailer: resend marshal: %w", err)
+		return "", fmt.Errorf("mailer: resend marshal: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, resendEndpoint, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("mailer: resend request: %w", err)
+		return "", fmt.Errorf("mailer: resend request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+r.apiKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -124,13 +131,19 @@ func (r *Resend) Send(ctx context.Context, msg Message) error {
 	if err != nil {
 		// A transport failure here is genuinely unreachable-network territory, so it maps
 		// onto the same sentinel SMTP uses and the admin gets consistent advice.
-		return fmt.Errorf("mailer: resend post: %w: %w", ErrUnreachable, err)
+		return "", fmt.Errorf("mailer: resend post: %w: %w", ErrUnreachable, err)
 	}
 	defer resp.Body.Close() // #nosec G104 -- response body close error is not actionable
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		// The id is only used to match a later bounce; a body we cannot read is not a
+		// failed send.
+		var sent struct {
+			ID string `json:"id"`
+		}
+		_ = json.NewDecoder(io.LimitReader(resp.Body, 64<<10)).Decode(&sent)
 		_, _ = io.Copy(io.Discard, resp.Body) // drain so the connection can be reused
-		return nil
+		return sent.ID, nil
 	}
 
 	detail := resendErrorDetail(resp.Body)
@@ -138,9 +151,9 @@ func (r *Resend) Send(ctx context.Context, msg Message) error {
 	// 429 and 5xx are worth another attempt; a 4xx means the request itself is wrong and
 	// resending it unchanged will fail identically.
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-		return fmt.Errorf("mailer: resend api %d: %s", resp.StatusCode, detail)
+		return "", fmt.Errorf("mailer: resend api %d: %s", resp.StatusCode, detail)
 	}
-	return fmt.Errorf("mailer: resend api %d: %w: %s", resp.StatusCode, ErrEmailRejected, detail)
+	return "", fmt.Errorf("mailer: resend api %d: %w: %s", resp.StatusCode, ErrEmailRejected, detail)
 }
 
 // resendErrorDetail pulls the human-readable message out of an error response, falling back

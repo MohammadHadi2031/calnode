@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { api, type Booking } from '$lib/api';
+	import { api, type Booking, type BookingEmail } from '$lib/api';
 	import { currentUser } from '$lib/stores';
 	import { prefs, fmtDateTime, fmtTime } from '$lib/prefs';
 	import { Button, buttonVariants } from '$lib/components/ui/button';
@@ -61,9 +61,52 @@
 	let answersCache: Record<string, AnswerItem[]> = $state({});
 	let answersLoading: Record<string, boolean> = $state({});
 
+	// Email log per booking (fork: docs/fork-email-log.md). Not cached: a resend or a
+	// late bounce changes it, so it is reloaded each time the row opens.
+	let emailsById: Record<string, BookingEmail[]> = $state({});
+	let emailsLoading: Record<string, boolean> = $state({});
+	let resending: Record<string, boolean> = $state({});
+	let resendResult: Record<string, { ok: boolean; text: string }> = $state({});
+
+	async function loadEmails(id: string) {
+		emailsLoading[id] = true;
+		try {
+			const res = await api.get<{ items: BookingEmail[] }>(`/v1/bookings/${id}/emails`);
+			emailsById[id] = res.items ?? [];
+		} catch {
+			emailsById[id] = [];
+		}
+		emailsLoading[id] = false;
+	}
+
+	async function resend(b: Booking, to: 'attendee' | 'hosts') {
+		resending[b.id] = true;
+		delete resendResult[b.id];
+		try {
+			const res = await api.post<{ sent: number; failed: number }>(
+				`/v1/bookings/${b.id}/resend-confirmation`, { to }
+			);
+			const who = to === 'hosts' ? 'host' : 'recipient';
+			resendResult[b.id] = res.failed === 0
+				? { ok: true, text: `Sent to ${res.sent} ${who}${res.sent === 1 ? '' : 's'}.` }
+				: { ok: false, text: `${res.failed} of ${res.sent + res.failed} failed — see the error below.` };
+			if (to === 'attendee' && res.failed === 0) b.confirm_failed = false;
+		} catch (e: any) {
+			resendResult[b.id] = { ok: false, text: e.message };
+		}
+		resending[b.id] = false;
+		await loadEmails(b.id);
+	}
+
+	const emailKindLabel: Record<string, string> = {
+		confirmation: 'Confirmation', cancellation: 'Cancellation',
+		reschedule: 'Reschedule', reminder: 'Reminder'
+	};
+
 	async function toggleExpand(id: string) {
 		if (expandedId === id) { expandedId = null; return; }
 		expandedId = id;
+		loadEmails(id);
 		if (answersCache[id] === undefined) {
 			answersLoading[id] = true;
 			try {
@@ -450,6 +493,9 @@
 								{:else if b.status === 'confirmed' && b.rsvp_status === 'declined'}
 									<Badge class="border-transparent bg-destructive/10 text-destructive">guest declined</Badge>
 								{/if}
+								{#if b.status === 'confirmed' && b.confirm_failed}
+									<Badge class="border-transparent bg-destructive/10 text-destructive">email failed</Badge>
+								{/if}
 							</div>
 						</td>
 						<td class="px-4 py-3">
@@ -468,7 +514,7 @@
 												style="transition:transform .15s;transform:rotate({expandedId === b.id ? 180 : 0}deg)"
 											><polyline points="6 9 12 15 18 9"/></svg>
 										</Tooltip.Trigger>
-										<Tooltip.Content>{expandedId === b.id ? 'Hide responses' : 'Show responses'}</Tooltip.Content>
+										<Tooltip.Content>{expandedId === b.id ? 'Hide details' : 'Show details'}</Tooltip.Content>
 									</Tooltip.Root>
 
 									{#if b.status === 'confirmed'}
@@ -557,6 +603,59 @@
 												</div>
 											{/each}
 										</dl>
+									{/if}
+
+									<div class="mt-4 mb-2 flex flex-wrap items-center justify-between gap-2">
+										<p class="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Emails</p>
+										{#if b.status === 'confirmed'}
+											<div class="flex flex-wrap gap-2">
+												<Button variant="outline" size="sm" disabled={resending[b.id]} onclick={() => resend(b, 'attendee')}>
+													{resending[b.id] ? 'Sending…' : 'Resend confirmation'}
+												</Button>
+												<Button variant="ghost" size="sm" disabled={resending[b.id]} onclick={() => resend(b, 'hosts')}>
+													Resend to hosts
+												</Button>
+											</div>
+										{/if}
+									</div>
+									{#if resendResult[b.id]}
+										<p class="mb-2 rounded-md px-3 py-1.5 text-sm {resendResult[b.id].ok ? 'bg-green-50 text-green-700' : 'bg-destructive/10 text-destructive'}">
+											{resendResult[b.id].text}
+										</p>
+									{/if}
+									{#if emailsLoading[b.id] && !emailsById[b.id]}
+										<p class="text-sm text-muted-foreground">Loading…</p>
+									{:else if !emailsById[b.id] || emailsById[b.id].length === 0}
+										<p class="text-sm text-muted-foreground">No emails recorded for this booking.</p>
+									{:else}
+										<div class="overflow-x-auto">
+											<table class="w-full text-sm">
+												<tbody>
+													{#each emailsById[b.id] as e (e.id)}
+														<tr class="border-t first:border-t-0 align-top">
+															<td class="whitespace-nowrap py-1.5 pr-4 text-muted-foreground">{fmt(e.created_at)}</td>
+															<td class="py-1.5 pr-4 font-medium">{emailKindLabel[e.kind] ?? e.kind}</td>
+															<td class="py-1.5 pr-4">
+																<span class="break-all">{e.recipient}</span>
+																<span class="text-xs text-muted-foreground"> · {e.role}</span>
+															</td>
+															<td class="py-1.5">
+																{#if e.status === 'sent'}
+																	<Badge class="border-green-200 bg-green-50 text-green-700">sent</Badge>
+																{:else if e.status === 'queued'}
+																	<Badge variant="secondary">sending</Badge>
+																{:else}
+																	<Badge class="border-transparent bg-destructive/10 text-destructive">{e.status}</Badge>
+																{/if}
+																{#if e.error}
+																	<p class="mt-1 max-w-md break-words text-xs text-destructive">{e.error}</p>
+																{/if}
+															</td>
+														</tr>
+													{/each}
+												</tbody>
+											</table>
+										</div>
 									{/if}
 								</div>
 							</td>
