@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -145,7 +146,19 @@ func (h *Handler) GetMe(w http.ResponseWriter, r *http.Request) {
 		secretaryFor = []string{}
 	}
 	out["secretary_for"] = secretaryFor
+	out["notify_host_reminder"] = h.hostReminderPref(r.Context(), user.ID)
 	h.writeJSON(w, http.StatusOK, out)
+}
+
+// hostReminderPref reads whether the user wants their own reminder of upcoming meetings
+// (fork: docs/fork-reminders.md). Kept out of AuthUser, which every request loads.
+func (h *Handler) hostReminderPref(ctx context.Context, userID string) bool {
+	var v int
+	if err := h.db.QueryRowContext(ctx,
+		`SELECT notify_host_reminder FROM users WHERE id = ?`, userID).Scan(&v); err != nil {
+		return true
+	}
+	return v != 0
 }
 
 // PatchMe handles PATCH /v1/users/me — updates timezone, time_format, week_start, date_format, and notification prefs.
@@ -168,6 +181,7 @@ func (h *Handler) PatchMe(w http.ResponseWriter, r *http.Request) {
 		NotifyHostBooking    *bool   `json:"notify_host_booking"`
 		NotifyHostCancel     *bool   `json:"notify_host_cancel"`
 		NotifyHostReschedule *bool   `json:"notify_host_reschedule"`
+		NotifyHostReminder   *bool   `json:"notify_host_reminder"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid JSON")
@@ -329,6 +343,15 @@ func (h *Handler) PatchMe(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	if req.NotifyHostReminder != nil {
+		if _, err := h.db.ExecContext(r.Context(),
+			`UPDATE users SET notify_host_reminder = ? WHERE id = ?`,
+			boolToInt(*req.NotifyHostReminder), user.ID); err != nil {
+			h.logger.ErrorContext(r.Context(), "patch me: host reminder", "error", err)
+			h.writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+	}
 
 	out := map[string]any{
 		"booking_accent": accent,
@@ -362,5 +385,6 @@ func (h *Handler) PatchMe(w http.ResponseWriter, r *http.Request) {
 		secretaryFor = []string{}
 	}
 	out["secretary_for"] = secretaryFor
+	out["notify_host_reminder"] = h.hostReminderPref(r.Context(), user.ID)
 	h.writeJSON(w, http.StatusOK, out)
 }

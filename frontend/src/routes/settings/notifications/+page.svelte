@@ -19,6 +19,7 @@
 	let notify_host_booking = $state(true);
 	let notify_host_cancel = $state(true);
 	let notify_host_reschedule = $state(true);
+	let notify_host_reminder = $state(true);
 
 	onMount(() => loadingFlag.run(async () => {
 		const user = await api.get<User>('/v1/users/me');
@@ -29,13 +30,14 @@
 		notify_host_booking = user.notify_host_booking ?? true;
 		notify_host_cancel = user.notify_host_cancel ?? true;
 		notify_host_reschedule = user.notify_host_reschedule ?? true;
+		notify_host_reminder = user.notify_host_reminder ?? true;
 	}, 'Could not load preferences'));
 
 	async function save() {
 		await savingFlag.run(async () => {
 			const updated = await api.patch<User>('/v1/users/me', {
 				notify_confirmation, notify_cancellation, notify_reschedule, notify_reminder,
-				notify_host_booking, notify_host_cancel, notify_host_reschedule,
+				notify_host_booking, notify_host_cancel, notify_host_reschedule, notify_host_reminder,
 			});
 			currentUser.set(updated);
 			toast.success('Preferences saved');
@@ -90,6 +92,10 @@
 						<div class="flex items-center justify-between gap-4">
 							<Label for="nhr" class="cursor-pointer font-normal">Booking rescheduled</Label>
 							<Switch id="nhr" bind:checked={notify_host_reschedule} />
+						</div>
+						<div class="flex items-center justify-between gap-4">
+							<Label for="nhm" class="cursor-pointer font-normal">Upcoming meeting reminder</Label>
+							<Switch id="nhm" bind:checked={notify_host_reminder} />
 						</div>
 					</div>
 				</div>

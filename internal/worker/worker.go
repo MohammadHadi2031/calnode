@@ -9,8 +9,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
+	"github.com/calnode/calnode/internal/booking"
 	"github.com/calnode/calnode/internal/branding"
 	"github.com/calnode/calnode/internal/i18n"
 	"github.com/calnode/calnode/internal/mailer"
@@ -323,9 +325,6 @@ func (w *Worker) sendReminder(ctx context.Context, payload string) error {
 	if status != "confirmed" {
 		return nil // cancelled or otherwise; skip silently
 	}
-	if notifyReminder == 0 {
-		return nil // host has disabled reminder emails
-	}
 
 	var parseErr error
 	if d.StartAt, parseErr = time.Parse(time.RFC3339Nano, startAt); parseErr != nil {
@@ -365,10 +364,90 @@ func (w *Worker) sendReminder(ctx context.Context, payload string) error {
 	// branding package is now the only place that does this.
 	branding.Load(ctx, w.db).ApplyTo(&d, w.publicURL)
 
-	if err := mailer.SendReminder(ctx, w.mailer, d); err != nil {
-		return fmt.Errorf("worker: reminder: send: %w", err)
+	// Wisegrid fork (docs/fork-reminders.md): the reminder reaches the booker, every guest
+	// and every host, and the booker's carries a manage link to reschedule or cancel.
+	//
+	// The booker goes first and is the only send whose failure fails the job: a retry then
+	// starts over with nobody reminded yet, instead of sending the guests and hosts theirs
+	// twice. Later failures are logged (and land in the email log and its alerts).
+	if notifyReminder != 0 { // the primary host's "Reminder emails" (to attendees) switch
+		// Only a hash of the booking-time manage token is stored, so issue a fresh one.
+		if tok, err := booking.New(w.db).IssueManageToken(ctx, p.BookingID); err != nil {
+			w.logger.Error("worker: reminder: issue manage token", "error", err, "booking_id", p.BookingID)
+		} else {
+			d.ManageURL = strings.TrimRight(w.publicURL, "/") + "/manage/" + tok
+		}
+		guests, err := w.reminderGuests(ctx, p.BookingID)
+		if err != nil {
+			return fmt.Errorf("worker: reminder: load guests: %w", err)
+		}
+		d.Guests = guests
+		if err := mailer.SendReminder(ctx, w.mailer, d); err != nil {
+			return fmt.Errorf("worker: reminder: send: %w", err)
+		}
+		for _, g := range guests {
+			if err := mailer.SendReminder(ctx, w.mailer, d.ForGuest(g)); err != nil {
+				w.logger.Error("worker: reminder: send to guest", "error", err, "booking_id", p.BookingID)
+			}
+		}
+	}
+
+	hosts, err := w.reminderHosts(ctx, p.BookingID)
+	if err != nil {
+		w.logger.Error("worker: reminder: load hosts", "error", err, "booking_id", p.BookingID)
+	}
+	for _, host := range hosts {
+		hd := d
+		hd.HostName, hd.HostEmail = host.Name, host.Email
+		if err := mailer.SendReminderToHost(ctx, w.mailer, hd); err != nil {
+			w.logger.Error("worker: reminder: send to host", "error", err, "booking_id", p.BookingID)
+		}
 	}
 	return nil
+}
+
+// reminderGuests returns the booking's guests (everyone invited besides the booker).
+func (w *Worker) reminderGuests(ctx context.Context, bookingID string) ([]mailer.Invitee, error) {
+	rows, err := w.db.QueryContext(ctx, `
+		SELECT name, email FROM booking_attendees
+		WHERE booking_id = ? AND is_organizer = 0 ORDER BY rowid`, bookingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []mailer.Invitee
+	for rows.Next() {
+		var g mailer.Invitee
+		if err := rows.Scan(&g.Name, &g.Email); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// reminderHosts returns the hosts attending the booking who want their own reminder
+// (users.notify_host_reminder), primary first. Read whole before any send: the pool has
+// a single connection.
+func (w *Worker) reminderHosts(ctx context.Context, bookingID string) ([]mailer.Invitee, error) {
+	rows, err := w.db.QueryContext(ctx, `
+		SELECT u.name, u.email FROM booking_hosts bh
+		JOIN users u ON u.id = bh.user_id
+		WHERE bh.booking_id = ? AND u.notify_host_reminder = 1 AND u.archived_at IS NULL
+		ORDER BY bh.is_primary DESC, bh.rowid`, bookingID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []mailer.Invitee
+	for rows.Next() {
+		var h mailer.Invitee
+		if err := rows.Scan(&h.Name, &h.Email); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
 }
 
 func (w *Worker) deliverWebhook(ctx context.Context, jobPayload string) error {

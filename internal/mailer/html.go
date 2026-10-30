@@ -162,6 +162,18 @@ var htmlReminderOrg = content(`{{define "content"}}
 {{template "note" .}}
 {{end}}`)
 
+var htmlReminderHost = content(`{{define "content"}}
+<p style="margin:0 0 4px;">Hi {{.HostName}},</p>
+<p style="margin:0 0 20px;color:#52525b;">Your meeting is coming up.</p>
+{{template "cardOpen" .}}
+<tr>` + labelTD + `Event</td><td style="padding:5px 0;font-weight:500;vertical-align:top;">{{.EventTypeName}}</td></tr>
+<tr>` + labelTD + `With</td>` + valueTD + `{{.OrganizerName}} &lt;{{.OrganizerEmail}}&gt;{{range .Guests}}<br>{{if .Name}}{{.Name}} {{end}}&lt;{{.Email}}&gt;{{end}}</td></tr>
+<tr>` + labelTD + `When</td>` + valueTD + `{{.WhenFmt}}</td></tr>
+{{if .LocationValue}}<tr>` + labelTD + `Location</td><td style="padding:5px 0;vertical-align:top;word-break:break-word;">{{.LocationValue}}</td></tr>{{end}}
+{{template "cardClose" .}}
+{{template "ref" .}}
+{{end}}`)
+
 // htmlByType maps RenderBody email types to their HTML template (attendee-facing).
 func htmlByType(emailType string) *template.Template {
 	switch emailType {

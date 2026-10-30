@@ -19,6 +19,8 @@ export type User = {
 	notify_host_booking: boolean;
 	notify_host_cancel: boolean;
 	notify_host_reschedule: boolean;
+	/** Fork: the host's own reminder of an upcoming meeting (docs/fork-reminders.md). */
+	notify_host_reminder?: boolean;
 	/** Fork: ids of the hosts this user is a secretary for (absent or empty = none). */
 	secretary_for?: string[];
 };

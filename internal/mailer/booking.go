@@ -415,6 +415,26 @@ func SendReminder(ctx context.Context, m Mailer, d BookingData) error {
 	return nil
 }
 
+// SendReminderToHost reminds one host of an upcoming meeting (wisegrid fork: reminders
+// reach every host, see docs/fork-reminders.md). English, like every host email.
+func SendReminderToHost(ctx context.Context, m Mailer, d BookingData) error {
+	ctx = d.hostTag(ctx, "reminder")
+	if d.HostEmail == "" {
+		return nil
+	}
+	d.HideManageLink = true
+	d.Locale = nil // host emails stay English regardless of the attendee's locale — see BookingData.Locale
+	if err := m.Send(ctx, Message{
+		To:      []string{d.HostEmail},
+		Subject: "Reminder: " + d.EventTypeName + " with " + d.OrganizerName,
+		Text:    render(reminderHostTmpl, d),
+		HTML:    renderHTML(htmlReminderHost, d),
+	}); err != nil {
+		return fmt.Errorf("mailer: reminder (host): %w", err)
+	}
+	return nil
+}
+
 // RenderBody renders the attendee-facing email for emailType and returns the
 // subject, plain-text body, and HTML body. Returns ok=false for unrecognised
 // emailType values. Valid types: "confirmation", "cancellation", "reschedule",
@@ -593,6 +613,23 @@ var reminderOrgTmpl = template.Must(template.New("reminder-org").Parse(
 ---
 {{.CustomNote}}
 {{end}}
+— {{.Brand}}
+`))
+
+var reminderHostTmpl = template.Must(template.New("reminder-host").Parse(
+	`Hi {{.HostName}},
+
+Your meeting is coming up.
+
+Event:    {{.EventTypeName}}
+With:     {{.OrganizerName}} <{{.OrganizerEmail}}>{{range .Guests}}
+          {{if .Name}}{{.Name}} {{end}}<{{.Email}}>{{end}}
+Start:    {{.StartFmt}}
+End:      {{.EndFmt}}{{if .LocationValue}}
+Location: {{.LocationValue}}{{end}}
+
+Booking reference: {{.BookingID}}
+
 — {{.Brand}}
 `))
 
