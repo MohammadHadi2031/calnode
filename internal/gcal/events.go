@@ -203,6 +203,90 @@ func (c *Client) UpdateEvent(ctx context.Context, userID, calendarID, eventID st
 	return nil
 }
 
+// AddAttendees adds people to an existing event and has Google invite them
+// (sendUpdates=all). The event's current attendees are read first and sent back with the
+// new ones, since a PATCH replaces the whole list; their RSVP state is kept as is.
+func (c *Client) AddAttendees(ctx context.Context, userID, calendarID, eventID string, add []calendar.Invitee) error {
+	if eventID == "" || len(add) == 0 {
+		return nil
+	}
+	hc, calID, err := c.writeClient(ctx, userID, true)
+	if err != nil {
+		return err
+	}
+	if hc == nil {
+		return calendar.ErrCannotAddAttendees
+	}
+	if calendarID != "" {
+		calID = calendarID
+	}
+	eventURL := c.apiBase + "/calendars/" + url.PathEscape(calID) + "/events/" + url.PathEscape(eventID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, eventURL+"?fields=attendees", nil)
+	if err != nil {
+		return fmt.Errorf("gcal: get attendees request: %w", err)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("gcal: get attendees call: %w", err)
+	}
+	// Raw messages, so every attendee goes back exactly as Google returned it.
+	var current struct {
+		Attendees []json.RawMessage `json:"attendees"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&current)
+	resp.Body.Close() // #nosec G104 -- read fully above; nothing actionable on close
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("gcal: get attendees status %d", resp.StatusCode)
+	}
+	if err != nil {
+		return fmt.Errorf("gcal: get attendees decode: %w", err)
+	}
+
+	seen := map[string]bool{}
+	attendees := current.Attendees
+	for _, a := range attendees {
+		var e struct {
+			Email string `json:"email"`
+		}
+		_ = json.Unmarshal(a, &e)
+		seen[strings.ToLower(e.Email)] = true
+	}
+	added := false
+	for _, g := range add {
+		key := strings.ToLower(g.Email)
+		if g.Email == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		raw, _ := json.Marshal(calEventAttendee{Email: g.Email, DisplayName: g.Name})
+		attendees = append(attendees, raw)
+		added = true
+	}
+	if !added {
+		return nil
+	}
+
+	body, err := json.Marshal(map[string]any{"attendees": attendees})
+	if err != nil {
+		return fmt.Errorf("gcal: add attendees marshal: %w", err)
+	}
+	req, err = http.NewRequestWithContext(ctx, http.MethodPatch, eventURL+"?sendUpdates=all", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("gcal: add attendees request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("gcal: add attendees call: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("gcal: add attendees status %d", resp.StatusCode)
+	}
+	return nil
+}
+
 // CancelEvent deletes a Google Calendar event by its event ID.
 // Returns nil if eventID is empty or the user has no connection.
 func (c *Client) CancelEvent(ctx context.Context, userID, calendarID, eventID string) error {

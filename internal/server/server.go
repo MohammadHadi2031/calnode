@@ -503,6 +503,8 @@ func New(ctx context.Context, cfg *config.Config, db *sql.DB, logger *slog.Logge
 	mux.HandleFunc("GET /v1/bookings/{id}/answers", h.RequireAuth(h.GetBookingAnswers))
 	mux.HandleFunc("GET /v1/bookings/{id}/emails", h.RequireAuth(h.ListBookingEmails))
 	mux.HandleFunc("POST /v1/bookings/{id}/resend-confirmation", h.RequireAuth(h.ResendConfirmation))
+	mux.HandleFunc("GET /v1/bookings/{id}/guests", h.RequireAuth(h.ListBookingGuests))
+	mux.HandleFunc("POST /v1/bookings/{id}/guests", h.RequireAuth(h.AddBookingGuest))
 
 	// Public booking page
 	mux.HandleFunc("GET /embed.js", h.EmbedJS)

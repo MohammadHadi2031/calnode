@@ -9,6 +9,7 @@
 	import * as Select from '$lib/components/ui/select';
 	import { DatePicker } from '$lib/components/ui/date-picker';
 	import { ConfirmDialog } from '$lib/components/ui/confirm-dialog';
+	import { Input } from '$lib/components/ui/input';
 
 	let items: Booking[] = $state([]);
 	let loading = $state(true);
@@ -98,6 +99,51 @@
 		await loadEmails(b.id);
 	}
 
+	// Guests (fork: docs/fork-host-guests.md). Hosts can add one to an upcoming booking.
+	type Guest = { name: string; email: string };
+	let guestsById: Record<string, Guest[]> = $state({});
+	let guestEmail: Record<string, string> = $state({});
+	let guestName: Record<string, string> = $state({});
+	let addingGuest: Record<string, boolean> = $state({});
+	let guestResult: Record<string, { ok: boolean; text: string }> = $state({});
+
+	async function loadGuests(id: string) {
+		try {
+			const res = await api.get<{ items: Guest[] }>(`/v1/bookings/${id}/guests`);
+			guestsById[id] = res.items ?? [];
+		} catch {
+			guestsById[id] = [];
+		}
+	}
+
+	async function addGuest(b: Booking) {
+		const email = (guestEmail[b.id] ?? '').trim();
+		if (!email) return;
+		addingGuest[b.id] = true;
+		delete guestResult[b.id];
+		try {
+			const res = await api.post<{ guests?: Guest[]; invited_via: string; warning?: string }>(
+				`/v1/bookings/${b.id}/guests`, { email, name: (guestName[b.id] ?? '').trim() }
+			);
+			if (res.guests) guestsById[b.id] = res.guests;
+			guestResult[b.id] = res.warning
+				? { ok: false, text: res.warning }
+				: { ok: true, text: res.invited_via === 'calendar'
+					? `${email} was added to the calendar invitation.`
+					: `${email} was sent an invitation email.` };
+			guestEmail[b.id] = '';
+			guestName[b.id] = '';
+		} catch (e: any) {
+			guestResult[b.id] = { ok: false, text: e.message };
+		}
+		addingGuest[b.id] = false;
+		loadEmails(b.id);
+	}
+
+	function isUpcoming(b: Booking) {
+		return b.status === 'confirmed' && new Date(b.end_at).getTime() > Date.now();
+	}
+
 	const emailKindLabel: Record<string, string> = {
 		confirmation: 'Confirmation', cancellation: 'Cancellation',
 		reschedule: 'Reschedule', reminder: 'Reminder'
@@ -107,6 +153,7 @@
 		if (expandedId === id) { expandedId = null; return; }
 		expandedId = id;
 		loadEmails(id);
+		loadGuests(id);
 		if (answersCache[id] === undefined) {
 			answersLoading[id] = true;
 			try {
@@ -603,6 +650,42 @@
 												</div>
 											{/each}
 										</dl>
+									{/if}
+
+									<p class="mt-4 mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Guests</p>
+									{#if !guestsById[b.id] || guestsById[b.id].length === 0}
+										<p class="text-sm text-muted-foreground">No guests besides the booker.</p>
+									{:else}
+										<ul class="space-y-1 text-sm">
+											{#each guestsById[b.id] as g (g.email)}
+												<li>
+													{#if g.name}<span class="font-medium">{g.name}</span> · {/if}<span class="break-all text-muted-foreground">{g.email}</span>
+												</li>
+											{/each}
+										</ul>
+									{/if}
+									{#if isUpcoming(b)}
+										<form
+											class="mt-2 flex flex-wrap items-center gap-2"
+											onsubmit={(e) => { e.preventDefault(); addGuest(b); }}
+										>
+											<Input
+												type="email" required placeholder="guest@company.com" class="h-8 w-56"
+												aria-label="Guest email" bind:value={guestEmail[b.id]}
+											/>
+											<Input
+												placeholder="Name (optional)" class="h-8 w-44"
+												aria-label="Guest name" bind:value={guestName[b.id]}
+											/>
+											<Button type="submit" variant="outline" size="sm" disabled={addingGuest[b.id] || !guestEmail[b.id]}>
+												{addingGuest[b.id] ? 'Inviting…' : 'Add guest'}
+											</Button>
+										</form>
+									{/if}
+									{#if guestResult[b.id]}
+										<p class="mt-2 rounded-md px-3 py-1.5 text-sm {guestResult[b.id].ok ? 'bg-green-50 text-green-700' : 'bg-destructive/10 text-destructive'}">
+											{guestResult[b.id].text}
+										</p>
 									{/if}
 
 									<div class="mt-4 mb-2 flex flex-wrap items-center justify-between gap-2">

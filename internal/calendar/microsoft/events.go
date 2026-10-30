@@ -188,6 +188,86 @@ func (c *Client) UpdateEvent(ctx context.Context, userID, calendarID, eventID st
 	return nil
 }
 
+// AddAttendees adds people to an existing event; Graph sends them the invite. The current
+// attendees are read and sent back with the new ones, since a PATCH replaces the list.
+// calendarID is unused, as for UpdateEvent.
+func (c *Client) AddAttendees(ctx context.Context, userID, calendarID, eventID string, add []calendar.Invitee) error {
+	if eventID == "" || len(add) == 0 {
+		return nil
+	}
+	hc, _, err := c.writeClient(ctx, userID, true)
+	if err != nil {
+		return err
+	}
+	if hc == nil {
+		return calendar.ErrCannotAddAttendees
+	}
+	eventURL := c.apiBase + "/me/events/" + url.PathEscape(eventID)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, eventURL+"?$select=attendees", nil)
+	if err != nil {
+		return fmt.Errorf("microsoft: get attendees request: %w", err)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("microsoft: get attendees call: %w", err)
+	}
+	var current struct {
+		Attendees []graphAttendee `json:"attendees"`
+	}
+	if resp.StatusCode != http.StatusOK {
+		detail := graphErrBody(resp)
+		resp.Body.Close() // #nosec G104 -- error path; nothing actionable on close
+		return fmt.Errorf("microsoft: get attendees status %d: %s", resp.StatusCode, detail)
+	}
+	err = json.NewDecoder(resp.Body).Decode(&current)
+	resp.Body.Close() // #nosec G104 -- read fully above; nothing actionable on close
+	if err != nil {
+		return fmt.Errorf("microsoft: get attendees decode: %w", err)
+	}
+
+	seen := map[string]bool{}
+	attendees := current.Attendees
+	for _, a := range attendees {
+		seen[strings.ToLower(a.EmailAddress.Address)] = true
+	}
+	added := false
+	for _, g := range add {
+		key := strings.ToLower(g.Email)
+		if g.Email == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		a := graphAttendee{Type: "required"}
+		a.EmailAddress.Address = g.Email
+		a.EmailAddress.Name = g.Name
+		attendees = append(attendees, a)
+		added = true
+	}
+	if !added {
+		return nil
+	}
+
+	body, err := json.Marshal(map[string]any{"attendees": attendees})
+	if err != nil {
+		return fmt.Errorf("microsoft: add attendees marshal: %w", err)
+	}
+	req, err = http.NewRequestWithContext(ctx, http.MethodPatch, eventURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("microsoft: add attendees request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("microsoft: add attendees call: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("microsoft: add attendees status %d: %s", resp.StatusCode, graphErrBody(resp))
+	}
+	return nil
+}
+
 // CancelEvent deletes a Graph event by ID (Graph notifies attendees). No-op if
 // eventID is empty or the user has no connection.
 // calendarID is unused here for the same reason as UpdateEvent: /me/events/{id} resolves

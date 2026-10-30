@@ -465,6 +465,32 @@ func (s *Service) UpdateEvent(ctx context.Context, userID, calendarID, eventID, 
 	return nil
 }
 
+// AttendeeAdder is implemented by a provider that can add attendees to an event it
+// already holds and invite them itself (Google, Microsoft; wisegrid fork). Attendees
+// already on the event are kept, and adding one twice is a no-op.
+type AttendeeAdder interface {
+	AddAttendees(ctx context.Context, userID, calendarID, eventID string, add []Invitee) error
+}
+
+// ErrCannotAddAttendees means the event's provider cannot add attendees to an existing
+// event (CalDAV): the caller must invite them some other way.
+var ErrCannotAddAttendees = errors.New("calendar: provider cannot add attendees to an existing event")
+
+// AddAttendees adds add to an existing event, resolving the provider as UpdateEvent does.
+// It returns ErrCannotAddAttendees when that provider has no AttendeeAdder or does not
+// email guests itself, since then nobody would tell the new attendee.
+func (s *Service) AddAttendees(ctx context.Context, userID, calendarID, eventID, provider string, add []Invitee) error {
+	pr := s.providerForEvent(ctx, userID, eventID, provider)
+	if pr == nil {
+		return ErrCannotAddAttendees
+	}
+	a, ok := pr.(AttendeeAdder)
+	if !ok || !pr.InvitesGuests() {
+		return ErrCannotAddAttendees
+	}
+	return a.AddAttendees(ctx, userID, calendarID, eventID, add)
+}
+
 // CancelEvent deletes an event. calendarID and provider are the ones recorded at
 // creation; provider "" falls back as for UpdateEvent.
 func (s *Service) CancelEvent(ctx context.Context, userID, calendarID, eventID, provider string) error {

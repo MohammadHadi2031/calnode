@@ -264,10 +264,11 @@ func (h *Handler) recordEmailBounce(ctx context.Context, providerID, reason stri
 	return true, nil
 }
 
-// canManageBookingEmails reports whether user may see a booking's email log and resend
-// its emails: admins for every booking, a host for any booking they hold a seat on (the
-// bookings list's visibility rule, ARCHITECTURE §14). Writes the 404/500 itself.
-func (h *Handler) canManageBookingEmails(w http.ResponseWriter, r *http.Request, user AuthUser, bookingID string) bool {
+// canManageBooking reports whether user may act on a booking's emails and guests (email
+// log, resend, adding guests): admins for every booking, a host for any booking they hold
+// a seat on (the bookings list's visibility rule, ARCHITECTURE §14). Writes the 404/500
+// itself.
+func (h *Handler) canManageBooking(w http.ResponseWriter, r *http.Request, user AuthUser, bookingID string) bool {
 	var n int
 	err := h.db.QueryRowContext(r.Context(), `
 		SELECT COUNT(*) FROM bookings b
@@ -303,7 +304,7 @@ type emailLogJSON struct {
 func (h *Handler) ListBookingEmails(w http.ResponseWriter, r *http.Request) {
 	user, _ := userFromContext(r.Context())
 	id := r.PathValue("id")
-	if !h.canManageBookingEmails(w, r, user, id) {
+	if !h.canManageBooking(w, r, user, id) {
 		return
 	}
 	rows, err := h.db.QueryContext(r.Context(), `
@@ -357,7 +358,7 @@ func (h *Handler) ResendConfirmation(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, `"to" must be "attendee" or "hosts"`)
 		return
 	}
-	if !h.canManageBookingEmails(w, r, user, id) {
+	if !h.canManageBooking(w, r, user, id) {
 		return
 	}
 	b, err := h.bookingSvc.Get(r.Context(), id)
@@ -377,7 +378,7 @@ func (h *Handler) ResendConfirmation(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), resendBudget)
 	defer cancel()
-	d, err := h.loadConfirmationData(ctx, b)
+	d, err := h.loadConfirmationData(ctx, b, true)
 	if err != nil {
 		h.logger.ErrorContext(ctx, "resend confirmation: load data", "error", err, "booking_id", b.ID)
 		h.writeError(w, http.StatusInternalServerError, "internal error")
@@ -444,9 +445,10 @@ func (h *Handler) ResendConfirmation(w http.ResponseWriter, r *http.Request) {
 
 // loadConfirmationData rebuilds a booking's confirmation email data from the database,
 // for a resend: what dispatchBookingConfirmation had in hand at booking time, minus the
-// calendar phase (the stored location already holds any minted link). Issues a fresh
-// manage link, since only a hash of the original is stored.
-func (h *Handler) loadConfirmationData(ctx context.Context, b *booking.Booking) (mailer.BookingData, error) {
+// calendar phase (the stored location already holds any minted link). withManageLink
+// issues a fresh manage link (only a hash of the original is stored); a guest's copy has
+// none, so it needs none.
+func (h *Handler) loadConfirmationData(ctx context.Context, b *booking.Booking, withManageLink bool) (mailer.BookingData, error) {
 	d, err := h.loadCancellationData(ctx, b)
 	if err != nil {
 		return d, err
@@ -458,10 +460,12 @@ func (h *Handler) loadConfirmationData(ctx context.Context, b *booking.Booking) 
 	_ = h.db.QueryRowContext(ctx, `SELECT msg_confirmation, subj_confirmation FROM event_types WHERE id = ?`, b.EventTypeID).
 		Scan(&msgNote, &subjNote)
 	d.CustomNote, d.SubjectOverride = msgNote.String, subjNote.String
-	if tok, err := h.bookingSvc.IssueManageToken(ctx, b.ID); err != nil {
-		h.logger.ErrorContext(ctx, "resend confirmation: issue manage token", "error", err, "booking_id", b.ID)
-	} else {
-		d.ManageURL = h.publicURL() + "/manage/" + tok
+	if withManageLink {
+		if tok, err := h.bookingSvc.IssueManageToken(ctx, b.ID); err != nil {
+			h.logger.ErrorContext(ctx, "resend confirmation: issue manage token", "error", err, "booking_id", b.ID)
+		} else {
+			d.ManageURL = h.publicURL() + "/manage/" + tok
+		}
 	}
 	_, d.Guests = guestInvitees(h.loadGuests(ctx, b.ID))
 	return d, nil
