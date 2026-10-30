@@ -20,6 +20,21 @@ type recordingProvider struct {
 
 	mu     sync.Mutex
 	writes []recordedWrite
+	// cancels records CancelEvent calls as "userID/eventID" (rollout gate, R1 acceptance 4).
+	cancels []string
+}
+
+func (p *recordingProvider) CancelEvent(_ context.Context, userID, _, eventID string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cancels = append(p.cancels, userID+"/"+eventID)
+	return nil
+}
+
+func (p *recordingProvider) cancelled() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.cancels...)
 }
 
 type recordedWrite struct {

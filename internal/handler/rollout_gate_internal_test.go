@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -85,6 +86,63 @@ func TestGate_collectiveRaceForOneSlot(t *testing.T) {
 	}
 	if seats != 2 {
 		t.Errorf("confirmed host seats at the slot = %d; want 2 (A and B, once each)", seats)
+	}
+}
+
+// R1 acceptance 4: cancelling an A+B booking removes the meeting from both calendars. It
+// is one shared event on the meeting host's calendar with the other host invited, so
+// deleting that event (the provider notifies every attendee) is what clears both.
+func TestGate_cancelRemovesTheMeetingForBothHosts(t *testing.T) {
+	f := newMeetFixture(t, "google_meet")
+	start := time.Now().UTC().Add(72 * time.Hour).Truncate(24 * time.Hour).Add(10 * time.Hour)
+	code, id := f.bookAt(t, start, "lead@client.example")
+	if code != http.StatusCreated {
+		t.Fatalf("book: %d %s", code, id)
+	}
+	// Wait for the calendar phase to record the shared event.
+	var events []string
+	deadline := time.Now().Add(5 * time.Second)
+	for len(events) == 0 {
+		rows, err := f.h.db.Query(`SELECT user_id || '/' || external_event_id FROM booking_hosts
+			WHERE booking_id = ? AND COALESCE(external_event_id, '') != ''`, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for rows.Next() {
+			var e string
+			_ = rows.Scan(&e)
+			events = append(events, e)
+		}
+		rows.Close()
+		if len(events) == 0 && time.Now().After(deadline) {
+			t.Fatal("no calendar event was recorded for the booking")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	var invited int
+	_ = f.h.db.QueryRow(`SELECT COUNT(*) FROM booking_hosts WHERE booking_id = ? AND invited_via_organizer = 1`, id).Scan(&invited)
+	if len(events) != 1 || invited != 1 {
+		t.Fatalf("events %v, invited seats %d; want one shared event with the other host invited", events, invited)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/bookings/"+id+"/cancel", strings.NewReader(`{}`))
+	req.Header.Set("X-API-Key", f.apiKey)
+	req.SetPathValue("id", id)
+	rec := httptest.NewRecorder()
+	f.h.RequireAuth(f.h.CancelBooking)(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("cancel: %d — %s", rec.Code, rec.Body.String())
+	}
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		got := append(f.google.cancelled(), f.microsoft.cancelled()...)
+		if len(got) == 1 && got[0] == events[0] {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cancelled events = %v; want exactly the shared event %s", got, events[0])
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
