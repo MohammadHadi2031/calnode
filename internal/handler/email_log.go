@@ -266,15 +266,17 @@ func (h *Handler) recordEmailBounce(ctx context.Context, providerID, reason stri
 
 // canManageBooking reports whether user may act on a booking's emails and guests (email
 // log, resend, adding guests): admins for every booking, a host for any booking they hold
-// a seat on (the bookings list's visibility rule, ARCHITECTURE §14). Writes the 404/500
-// itself.
+// a seat on (the bookings list's visibility rule, ARCHITECTURE §14), and the secretary of
+// the booking's primary host (the Schedule page's rule, docs/fork-staff-calendar.md).
+// Writes the 404/500 itself.
 func (h *Handler) canManageBooking(w http.ResponseWriter, r *http.Request, user AuthUser, bookingID string) bool {
 	var n int
 	err := h.db.QueryRowContext(r.Context(), `
 		SELECT COUNT(*) FROM bookings b
 		WHERE b.id = ? AND (? OR b.host_id = ?
-		  OR EXISTS (SELECT 1 FROM booking_hosts bh WHERE bh.booking_id = b.id AND bh.user_id = ?))`,
-		bookingID, user.IsAdmin, user.ID, user.ID).Scan(&n)
+		  OR EXISTS (SELECT 1 FROM booking_hosts bh WHERE bh.booking_id = b.id AND bh.user_id = ?)
+		  OR EXISTS (SELECT 1 FROM secretary_hosts sh WHERE sh.secretary_id = ? AND sh.host_id = b.host_id))`,
+		bookingID, user.IsAdmin, user.ID, user.ID, user.ID).Scan(&n)
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "booking emails: authorize", "error", err)
 		h.writeError(w, http.StatusInternalServerError, "internal error")

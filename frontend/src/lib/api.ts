@@ -383,7 +383,10 @@ export type StaffBooking = {
 	location_value?: string;
 	attendee_name: string;
 	attendee_email: string;
+	/** The booker's zone: the booking's emails to the booker and guests use it. */
+	attendee_timezone?: string;
 	guests?: string[];
+	guest_list?: { name: string; email: string }[];
 	can_manage: boolean;
 };
 

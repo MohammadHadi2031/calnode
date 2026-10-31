@@ -308,3 +308,52 @@ func TestStaffBooking_moveAndCancel(t *testing.T) {
 	}
 	f.waitFor(t, inviteBookerEmail, 3) // confirmation, reschedule notices and the cancellation land in the background
 }
+
+// The Schedule's one attendee list: guests can carry names, the calendar returns them with
+// the booker's zone, and the primary host's secretary can add another attendee later.
+func TestStaffBooking_namedGuestsZoneAndSecretaryAddsGuest(t *testing.T) {
+	f := newStaffFixture(t)
+	f.as(t, f.owner, f.h.SetSecretaryHosts, "PUT", "/v1/users/sec-1/secretary-hosts", `{"host_ids":["`+f.owner.ID+`"]}`, f.secretary.ID)
+
+	body := fmt.Sprintf(`{"host_id":%q,"event_type_id":%q,"start_at":%q,"name":"Walk In","email":"walk@in.example",
+		"timezone":"America/New_York","guests":[{"name":"Pat Pal","email":"pal@in.example"},"plain@in.example"]}`,
+		f.owner.ID, f.etID, f.at("14:00"))
+	rec := f.as(t, f.secretary, f.h.CreateStaffBooking, "POST", "/v1/staff/bookings", body, "")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("staff booking: %d %s", rec.Code, rec.Body.String())
+	}
+	id := idOf(t, rec)
+	f.waitFor(t, "walk@in.example", 1)
+
+	calendar := func() staffCalendarBooking {
+		t.Helper()
+		rec := f.as(t, f.secretary, f.h.GetStaffCalendar, "GET",
+			"/v1/staff/calendar?from="+f.at("00:00")+"&to="+f.day.Add(24*time.Hour).Format(time.RFC3339), "", "")
+		var cal struct {
+			Bookings []staffCalendarBooking `json:"bookings"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &cal); err != nil || len(cal.Bookings) != 1 {
+			t.Fatalf("calendar = %d %s", rec.Code, rec.Body.String())
+		}
+		return cal.Bookings[0]
+	}
+	b := calendar()
+	if b.AttendeeTimezone != "America/New_York" {
+		t.Errorf("attendee_timezone = %q; want the zone the appointment was booked in", b.AttendeeTimezone)
+	}
+	want := []guestJSON{{Name: "Pat Pal", Email: "pal@in.example"}, {Name: "", Email: "plain@in.example"}}
+	if fmt.Sprint(b.GuestList) != fmt.Sprint(want) {
+		t.Errorf("guest_list = %+v; want %+v", b.GuestList, want)
+	}
+
+	if rec := f.as(t, f.member, f.h.AddBookingGuest, "POST", "/v1/bookings/"+id+"/guests", `{"email":"x@in.example"}`, id); rec.Code != http.StatusNotFound {
+		t.Errorf("member adding a guest: %d; want 404", rec.Code)
+	}
+	rec = f.as(t, f.secretary, f.h.AddBookingGuest, "POST", "/v1/bookings/"+id+"/guests", `{"name":"Late Comer","email":"late@in.example"}`, id)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("secretary adding a guest: %d %s; want 201", rec.Code, rec.Body.String())
+	}
+	if got := calendar().GuestList; len(got) != 3 || got[0] != (guestJSON{Name: "Late Comer", Email: "late@in.example"}) {
+		t.Errorf("guest_list after add = %+v; want Late Comer added", got)
+	}
+}

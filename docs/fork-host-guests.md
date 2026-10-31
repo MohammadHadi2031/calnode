@@ -7,7 +7,7 @@ just like the guests a booker adds.
 
 ## Who and when
 
-- **Who:** admins, on every booking, and any host with a seat on the booking. This is the same rule as the bookings list and the email log (`canManageBooking`).
+- **Who:** admins, on every booking; any host with a seat on the booking; and the secretary of the booking's primary host. This is the same rule as the email log (`canManageBooking`).
 - **When:** confirmed bookings that have not ended yet.
 - **Refused:**
   - the booker's address;

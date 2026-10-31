@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/calnode/calnode/internal/booking"
+	"github.com/calnode/calnode/internal/calendar"
 	"github.com/calnode/calnode/internal/i18n"
 	"github.com/calnode/calnode/internal/slots"
 )
@@ -27,6 +28,9 @@ const (
 	bookingSeatsQuery pairQuery = `SELECT booking_id, user_id FROM booking_hosts
 		WHERE booking_id IN (%s) ORDER BY is_primary DESC, user_id`
 	bookingGuestEmailsQuery pairQuery = `SELECT booking_id, email FROM booking_attendees
+		WHERE booking_id IN (%s) AND is_organizer = 0 ORDER BY email`
+	// Name and email joined by a unit separator, which neither can contain.
+	bookingGuestDetailsQuery pairQuery = `SELECT booking_id, COALESCE(name, '') || char(31) || email FROM booking_attendees
 		WHERE booking_id IN (%s) AND is_organizer = 0 ORDER BY email`
 )
 
@@ -204,8 +208,12 @@ type staffCalendarBooking struct {
 	LocationValue string    `json:"location_value"`
 	AttendeeName  string    `json:"attendee_name"`
 	AttendeeEmail string    `json:"attendee_email"`
-	Guests        []string  `json:"guests"`
-	CanManage     bool      `json:"can_manage"`
+	// AttendeeTimezone is the booker's zone: the zone the booking's emails to the booker
+	// and guests are written in.
+	AttendeeTimezone string      `json:"attendee_timezone"`
+	Guests           []string    `json:"guests"`
+	GuestList        []guestJSON `json:"guest_list"`
+	CanManage        bool        `json:"can_manage"`
 }
 
 type staffBusy struct {
@@ -306,7 +314,7 @@ func (h *Handler) GetStaffCalendar(w http.ResponseWriter, r *http.Request) {
 		for i, id := range hostIDs {
 			if errs[i] != nil {
 				h.logger.WarnContext(ctx, "staff calendar: free/busy", "host", id, "error", errs[i])
-				busyErrors = append(busyErrors, busyErr{HostID: id, Error: "calendar could not be read"})
+				busyErrors = append(busyErrors, busyErr{HostID: id, Error: calendar.UserMessage(errs[i])})
 				continue
 			}
 			for _, iv := range slots.SubtractIntervals(results[i], own[i]) {
@@ -333,7 +341,7 @@ func (h *Handler) staffCalendarBookings(ctx context.Context, hostIDs []string, f
 	rows, err := h.db.QueryContext(ctx, `
 		SELECT DISTINCT b.id, b.event_type_id, COALESCE(et.name, ''), b.host_id, b.start_at, b.end_at, b.status,
 		       COALESCE(b.location_type, ''), COALESCE(b.location_value, ''),
-		       COALESCE(a.name, ''), COALESCE(a.email, '')
+		       COALESCE(a.name, ''), COALESCE(a.email, ''), COALESCE(a.iana_timezone, '')
 		FROM bookings b
 		JOIN booking_hosts bh ON bh.booking_id = b.id
 		LEFT JOIN event_types et ON et.id = b.event_type_id
@@ -349,14 +357,14 @@ func (h *Handler) staffCalendarBookings(ctx context.Context, hostIDs []string, f
 		var c staffCalendarBooking
 		var s, e string
 		if err := rows.Scan(&c.ID, &c.EventTypeID, &c.EventTypeName, &c.PrimaryHostID, &s, &e, &c.Status,
-			&c.LocationType, &c.LocationValue, &c.AttendeeName, &c.AttendeeEmail); err != nil {
+			&c.LocationType, &c.LocationValue, &c.AttendeeName, &c.AttendeeEmail, &c.AttendeeTimezone); err != nil {
 			rows.Close() // #nosec G104 -- already returning the scan error
 			return nil, err
 		}
 		c.StartAt, _ = time.Parse(time.RFC3339Nano, s)
 		c.EndAt, _ = time.Parse(time.RFC3339Nano, e)
 		c.CanManage = manageable[c.PrimaryHostID]
-		c.HostIDs, c.Guests = []string{}, []string{}
+		c.HostIDs, c.Guests, c.GuestList = []string{}, []string{}, []guestJSON{}
 		index[c.ID] = len(out)
 		out = append(out, c)
 	}
@@ -377,6 +385,12 @@ func (h *Handler) staffCalendarBookings(ctx context.Context, hostIDs []string, f
 	}
 	if err := h.scanPairs(ctx, bookingGuestEmailsQuery, ids,
 		func(id, v string) { out[index[id]].Guests = append(out[index[id]].Guests, v) }); err != nil {
+		return nil, err
+	}
+	if err := h.scanPairs(ctx, bookingGuestDetailsQuery, ids, func(id, v string) {
+		name, email, _ := strings.Cut(v, "")
+		out[index[id]].GuestList = append(out[index[id]].GuestList, guestJSON{Name: name, Email: email})
+	}); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -405,23 +419,56 @@ func (h *Handler) loadStaffEventType(ctx context.Context, id string) (*bookableE
 	return &et, slug, nil
 }
 
+// staffGuest is one guest in a staff booking request: an email string, or {name, email}.
+type staffGuest struct {
+	Name  string `json:"name"`
+	Email string `json:"email"`
+}
+
+func (g *staffGuest) UnmarshalJSON(b []byte) error {
+	var email string
+	if err := json.Unmarshal(b, &email); err == nil {
+		*g = staffGuest{Email: email}
+		return nil
+	}
+	type plain staffGuest
+	return json.Unmarshal(b, (*plain)(g))
+}
+
+// nameGuests copies the names given in the request onto the normalized guests, matching
+// by email. Names are capped at 200 characters, the same as a guest a host adds later.
+func nameGuests(guests []booking.Attendee, given []staffGuest) {
+	for i := range guests {
+		for _, g := range given {
+			if strings.EqualFold(strings.TrimSpace(g.Email), guests[i].Email) {
+				name := []rune(strings.TrimSpace(g.Name))
+				if len(name) > 200 {
+					name = name[:200]
+				}
+				guests[i].Name = string(name)
+				break
+			}
+		}
+	}
+}
+
 // CreateStaffBooking handles POST /v1/staff/bookings.
 func (h *Handler) CreateStaffBooking(w http.ResponseWriter, r *http.Request) {
 	actor, _ := userFromContext(r.Context())
 	ctx := r.Context()
 	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
 	var req struct {
-		HostID      string   `json:"host_id"`
-		EventTypeID string   `json:"event_type_id"`
-		StartAt     string   `json:"start_at"`
-		EndAt       string   `json:"end_at"`
-		Name        string   `json:"name"`
-		Email       string   `json:"email"`
-		Timezone    string   `json:"timezone"`
-		Language    string   `json:"language"`
-		Guests      []string `json:"guests"`
-		Conference  string   `json:"conference"`
-		Force       bool     `json:"force"`
+		HostID      string       `json:"host_id"`
+		EventTypeID string       `json:"event_type_id"`
+		StartAt     string       `json:"start_at"`
+		EndAt       string       `json:"end_at"`
+		Name        string       `json:"name"`
+		Email       string       `json:"email"`
+		Timezone    string       `json:"timezone"`
+		Language    string       `json:"language"`
+		Guests      []staffGuest `json:"guests"`
+		Conference  string       `json:"conference"`
+		Force       bool         `json:"force"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid JSON")
@@ -476,11 +523,16 @@ func (h *Handler) CreateStaffBooking(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	loc := i18n.Resolve("", req.Language)
-	guests, err := normalizeGuests(req.Guests, email, maxGuestsCeiling, loc)
+	guestEmails := make([]string, len(req.Guests))
+	for i, g := range req.Guests {
+		guestEmails[i] = g.Email
+	}
+	guests, err := normalizeGuests(guestEmails, email, maxGuestsCeiling, loc)
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	nameGuests(guests, req.Guests)
 	locValue := ""
 	if et.LocationValue != nil {
 		locValue = *et.LocationValue

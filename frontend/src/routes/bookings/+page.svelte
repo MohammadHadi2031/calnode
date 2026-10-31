@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { api, type Booking, type BookingEmail } from '$lib/api';
 	import { currentUser } from '$lib/stores';
-	import { prefs, fmtDateTime, fmtTime } from '$lib/prefs';
+	import { prefs, fmtDateTime, fmtTime, fmtZone } from '$lib/prefs';
 	import { Button, buttonVariants } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import * as Tooltip from '$lib/components/ui/tooltip';
@@ -382,6 +382,7 @@
 		<h1 class="text-2xl font-semibold tracking-tight">Bookings</h1>
 		<p class="mt-1 text-sm text-muted-foreground">
 			{scope === 'all' ? 'All meetings across the workspace.' : 'Meetings you are hosting.'}
+			Times are in <span class="font-medium text-foreground">{fmtZone($prefs)}</span>.
 		</p>
 	</div>
 	<div class="flex shrink-0 items-center gap-2">
@@ -498,7 +499,7 @@
 					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Attendee</th>
 					{#if scope === 'all'}<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Host</th>{/if}
 					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Event</th>
-					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Start time</th>
+					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Start time <span class="font-normal">({fmtZone($prefs)})</span></th>
 					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Status</th>
 					<th class="px-4 pb-3 pt-3"></th>
 				</tr>
@@ -772,7 +773,8 @@
 									</div>
 
 									{#if slots.length > 0}
-										<div class="mt-3 flex flex-wrap gap-2">
+										<p class="mt-3 text-xs text-muted-foreground">Times in {fmtZone($prefs)}</p>
+										<div class="mt-1.5 flex flex-wrap gap-2">
 											{#each slots as slot}
 												<button
 													onclick={() => (selectedSlot = slot.start)}

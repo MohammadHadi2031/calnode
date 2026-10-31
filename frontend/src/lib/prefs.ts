@@ -1,5 +1,7 @@
 import { writable, get } from 'svelte/store';
 import type { User } from './api';
+import { DateTime } from 'luxon';
+import { resolveZone, zoneLabel } from './timezones';
 
 export interface UserPrefs {
 	timezone: string;
@@ -26,24 +28,25 @@ export function prefsFromUser(u: User): UserPrefs {
 	};
 }
 
-function fmtDatePart(date: Date, format: 'dmy' | 'mdy' | 'ymd'): string {
-	const d = String(date.getDate()).padStart(2, '0');
-	const m = String(date.getMonth() + 1).padStart(2, '0');
-	const y = date.getFullYear();
-	if (format === 'mdy') return `${m}/${d}/${y}`;
-	if (format === 'ymd') return `${y}-${m}-${d}`;
-	return `${d}/${m}/${y}`;
+function zoneOf(p: UserPrefs): string {
+	return resolveZone(p.timezone);
 }
 
+function fmtDatePart(dt: DateTime, format: 'dmy' | 'mdy' | 'ymd'): string {
+	if (format === 'mdy') return dt.toFormat('LL/dd/yyyy');
+	if (format === 'ymd') return dt.toFormat('yyyy-LL-dd');
+	return dt.toFormat('dd/LL/yyyy');
+}
+
+function fmtTimePart(dt: DateTime, p: UserPrefs): string {
+	return dt.toFormat(p.time_format === '24h' ? 'HH:mm' : 'h:mm a');
+}
+
+/** Date and time in the user's profile time zone (not the browser's). */
 export function fmtDateTime(iso: string, p: UserPrefs = get(prefs)): string {
-	const date = new Date(iso);
-	const datePart = fmtDatePart(date, p.date_format);
-	const timePart = date.toLocaleTimeString(undefined, {
-		hour: '2-digit',
-		minute: '2-digit',
-		hour12: p.time_format === '12h'
-	});
-	return `${datePart}, ${timePart}`;
+	const dt = DateTime.fromISO(iso).setZone(zoneOf(p));
+	if (!dt.isValid) return iso;
+	return `${fmtDatePart(dt, p.date_format)}, ${fmtTimePart(dt, p)}`;
 }
 
 export function fmtDate(ymd: string, p: UserPrefs = get(prefs)): string {
@@ -54,30 +57,15 @@ export function fmtDate(ymd: string, p: UserPrefs = get(prefs)): string {
 	return `${d}/${m}/${y}`;
 }
 
+/** Time of day in the user's profile time zone (not the browser's). */
 export function fmtTime(iso: string, p: UserPrefs = get(prefs)): string {
-	return new Date(iso).toLocaleTimeString(undefined, {
-		hour: '2-digit',
-		minute: '2-digit',
-		hour12: p.time_format === '12h'
-	});
+	const dt = DateTime.fromISO(iso).setZone(zoneOf(p));
+	return dt.isValid ? fmtTimePart(dt, p) : iso;
+}
+
+/** "Asia/Tehran (UTC+03:30)": names the zone fmtDateTime and fmtTime use. */
+export function fmtZone(p: UserPrefs = get(prefs)): string {
+	return zoneLabel(zoneOf(p));
 }
 
 export const WEEK_DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
-
-export const TIMEZONES = [
-	'Pacific/Auckland',
-	'Australia/Sydney',
-	'Australia/Melbourne',
-	'Asia/Tokyo',
-	'Asia/Singapore',
-	'Asia/Dubai',
-	'Europe/London',
-	'Europe/Paris',
-	'Europe/Berlin',
-	'Europe/Amsterdam',
-	'America/New_York',
-	'America/Chicago',
-	'America/Denver',
-	'America/Los_Angeles',
-	'UTC'
-];

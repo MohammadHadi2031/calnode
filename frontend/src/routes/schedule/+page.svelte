@@ -26,9 +26,10 @@
 		type UnavailableBlock
 	} from '$lib/api';
 	import { currentUser } from '$lib/stores';
-	import { TIMEZONES } from '$lib/prefs';
+	import { resolveZone, zoneItems, zoneLabel, zoneOffset } from '$lib/timezones';
 	import { Button, buttonVariants } from '$lib/components/ui/button';
 	import { Checkbox } from '$lib/components/ui/checkbox';
+	import { Combobox } from '$lib/components/ui/combobox';
 	import { ConfirmDialog } from '$lib/components/ui/confirm-dialog';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import * as Popover from '$lib/components/ui/popover';
@@ -37,18 +38,44 @@
 	import { Label } from '$lib/components/ui/label';
 	import { Switch } from '$lib/components/ui/switch';
 	import { toast } from 'svelte-sonner';
+	import GlobeIcon from '@lucide/svelte/icons/globe';
+	import PlusIcon from '@lucide/svelte/icons/plus';
+	import XIcon from '@lucide/svelte/icons/x';
 
 	// ---------------------------------------------------------------------------------
-	// Viewer preferences. The calendar renders in the viewer's profile time zone, not the
-	// browser's, so every conversion below goes through luxon with this zone.
+	// Viewer preferences. The calendar renders in the viewer's profile time zone (or one
+	// they switch the view to), never silently in the browser's, so every conversion below
+	// goes through luxon with an explicit zone, and the zone is always on screen.
 	// ---------------------------------------------------------------------------------
 
-	function resolveZone(z: string | undefined): string {
-		if (z && IANAZone.isValidZone(z)) return z;
-		return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+	const profileTz = resolveZone($currentUser?.timezone);
+	const tzStorageKey = `calnode.schedule.tz.${$currentUser?.id ?? 'anon'}`;
+	function restoreViewTz(): string {
+		try {
+			const z = localStorage.getItem(tzStorageKey);
+			if (z && IANAZone.isValidZone(z)) return z;
+		} catch {
+			/* storage unavailable */
+		}
+		return profileTz;
+	}
+	/** The zone the calendar is drawn in. */
+	const initialViewTz = restoreViewTz();
+	let viewTz = $state(initialViewTz);
+	const ZONE_ITEMS = zoneItems([profileTz, initialViewTz]);
+
+	function setViewTz(z: string) {
+		if (!z || !IANAZone.isValidZone(z) || z === viewTz) return;
+		viewTz = z;
+		try {
+			if (z === profileTz) localStorage.removeItem(tzStorageKey);
+			else localStorage.setItem(tzStorageKey, z);
+		} catch {
+			/* private mode etc. */
+		}
+		calendar?.setOption('timeZone', z);
 	}
 
-	const tz = resolveZone($currentUser?.timezone);
 	const hour12 = ($currentUser?.time_format ?? '12h') !== '24h';
 	const weekStart = $currentUser?.week_start ?? 1;
 	const dateFormat = $currentUser?.date_format ?? 'dmy';
@@ -61,41 +88,54 @@
 		? { hour: 'numeric', minute: '2-digit', omitZeroMinute: true, meridiem: 'short' }
 		: { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
 
-	/** A FullCalendar date string (offset included with the luxon plugin) as a DateTime in tz. */
+	/** A FullCalendar date string (offset included with the luxon plugin) as a DateTime in the view zone. */
 	function fromFc(s: string): DateTime {
-		return DateTime.fromISO(s, { zone: tz, setZone: true }).setZone(tz);
+		return DateTime.fromISO(s, { zone: viewTz, setZone: true }).setZone(viewTz);
 	}
 	function toUtcIso(dt: DateTime): string {
 		return dt.toUTC().toISO({ suppressMilliseconds: true }) ?? '';
 	}
-	function toInput(dt: DateTime): string {
-		return dt.setZone(tz).toFormat(INPUT_PATTERN);
+	/** <input type="datetime-local"> value: the instant's wall time in zone. */
+	function toInput(dt: DateTime, zone: string): string {
+		return dt.setZone(zone).toFormat(INPUT_PATTERN);
 	}
-	function fromInput(v: string): DateTime | null {
+	/** The instant an <input type="datetime-local"> value means in zone. */
+	function fromInput(v: string, zone: string): DateTime | null {
 		if (!v) return null;
-		const d = DateTime.fromISO(v, { zone: tz });
+		const d = DateTime.fromISO(v, { zone });
 		return d.isValid ? d : null;
 	}
 	function fmtTimeOf(iso: string): string {
-		return DateTime.fromISO(iso).setZone(tz).toFormat(TIME_PATTERN);
+		return DateTime.fromISO(iso).setZone(viewTz).toFormat(TIME_PATTERN);
 	}
-	function fmtRange(startIso: string, endIso: string): string {
-		const s = DateTime.fromISO(startIso).setZone(tz);
-		const e = DateTime.fromISO(endIso).setZone(tz);
+	/** "Thu 29/10/2026, 10:00 AM – 10:30 AM" in zone (without naming the zone). */
+	function fmtRange(start: DateTime | string, end: DateTime | string, zone: string = viewTz): string {
+		const s = (typeof start === 'string' ? DateTime.fromISO(start) : start).setZone(zone);
+		const e = (typeof end === 'string' ? DateTime.fromISO(end) : end).setZone(zone);
 		const day = (d: DateTime) => `${d.toFormat('ccc')} ${d.toFormat(DATE_PATTERN)}`;
 		if (s.hasSame(e, 'day')) return `${day(s)}, ${s.toFormat(TIME_PATTERN)} – ${e.toFormat(TIME_PATTERN)}`;
 		return `${day(s)}, ${s.toFormat(TIME_PATTERN)} – ${day(e)}, ${e.toFormat(TIME_PATTERN)}`;
 	}
 
-	const ALL_ZONES: string[] = (() => {
-		try {
-			const list = (Intl as unknown as { supportedValuesOf?: (k: string) => string[] }).supportedValuesOf?.('timeZone');
-			if (list && list.length) return list.includes('UTC') ? list : [...list, 'UTC'];
-		} catch {
-			/* older browser */
+	/** One line per distinct zone: who is in it, and the range in their local time. */
+	type ZoneRow = { who: string; zone: string; when: string; label: string };
+	function zoneRows(s: DateTime, e: DateTime, parties: { who: string; zone?: string | null }[]): ZoneRow[] {
+		const rows: { who: string[]; zone: string }[] = [];
+		for (const p of parties) {
+			if (!p.zone || !IANAZone.isValidZone(p.zone)) continue;
+			const r = rows.find((x) => x.zone === p.zone);
+			if (!r) rows.push({ who: [p.who], zone: p.zone });
+			else if (!r.who.includes(p.who)) r.who.push(p.who);
 		}
-		return TIMEZONES;
-	})();
+		return rows.map((r) => ({ who: r.who.join(' & '), zone: r.zone, when: fmtRange(s, e, r.zone), label: zoneLabel(r.zone, s) }));
+	}
+	/** The grid corner's two-line offset ("UTC" over "+03:30"); \A is a CSS line break. */
+	function cornerLabel(zone: string): string {
+		const off = zoneOffset(zone);
+		return off === 'UTC' ? 'UTC' : `UTC\\A${off.slice(3)}`;
+	}
+	/** Who the calendar's zone stands for in those rows. */
+	const viewerWho = $derived(viewTz === profileTz ? 'You' : 'Schedule view');
 
 	// ---------------------------------------------------------------------------------
 	// Hosts and selection
@@ -261,7 +301,10 @@
 	}
 
 	function onEventDidMount(arg: EventMountArg) {
+		// The preview FullCalendar draws while a range is dragged has no props. Reading a
+		// booking off it threw, which froze the drag-select at its first slot.
 		const p = arg.event.extendedProps as ItemProps;
+		if (arg.isMirror || !p?.kind) return;
 		const suffix = (id: string) => (multiHost ? ` · ${hostName(id)}` : '');
 		if (p.kind === 'busy') {
 			arg.el.title = `Busy (calendar)${suffix(p.host_id)}`;
@@ -297,17 +340,13 @@
 			const narrow = window.matchMedia('(max-width: 640px)').matches;
 			calendar = new Calendar(calendarEl, {
 				plugins: [timeGridPlugin, dayGridPlugin, interactionPlugin, luxonPlugin],
-				timeZone: tz,
+				timeZone: viewTz,
 				initialView: narrow ? 'timeGridDay' : 'timeGridWeek',
 				firstDay: weekStart,
 				headerToolbar: {
-					left: 'prev,next today tzLabel',
+					left: 'prev,next today',
 					center: 'title',
 					right: 'timeGridDay,timeGridWeek,dayGridMonth'
-				},
-				customButtons: {
-					// Rendered as a plain label (see .fc-tzLabel-button in the style block).
-					tzLabel: { text: tz.replace(/_/g, ' '), hint: `Times shown in ${tz}`, click: () => {} }
 				},
 				buttonText: { today: 'Today', day: 'Day', week: 'Week', month: 'Month' },
 				height: '100%',
@@ -380,11 +419,17 @@
 	let cEndManual = $state(false);
 	let cHostId = $state('');
 	let cEventTypeId = $state('');
-	let cName = $state('');
-	let cEmail = $state('');
+	/**
+	 * The appointment's time zone. Start and end are entered in it, and the booking's
+	 * emails and invites to its attendees are written in it.
+	 */
 	let cTz = $state('');
-	let cTzTouched = false;
-	let cGuests = $state('');
+	/**
+	 * Everyone invited, in one list. The first person is the main contact: they get the
+	 * confirmation with the reschedule/cancel link. The others are invited as guests.
+	 */
+	type Person = { name: string; email: string };
+	let cPeople = $state<Person[]>([{ name: '', email: '' }]);
 	let cConference = $state('');
 	let cTitle = $state('');
 	let cSync = $state(true);
@@ -396,6 +441,41 @@
 	const cEventType = $derived(cHost?.event_types.find((e) => e.id === cEventTypeId));
 	const isOnlineMeeting = (t: string) => t === 'google_meet' || t === 'teams';
 	const cShowConference = $derived(!!cEventType?.allow_conference_choice && isOnlineMeeting(cEventType.location_type));
+
+	/** The chosen time in the appointment's zone, the viewer's and the host's. */
+	const cZoneRows = $derived.by(() => {
+		const s = fromInput(cStart, cTz);
+		const e = fromInput(cEnd, cTz);
+		if (!s || !e || e <= s) return [];
+		const parties: { who: string; zone?: string }[] = [];
+		if (cMode === 'appointment') parties.push({ who: 'Attendees', zone: cTz });
+		parties.push({ who: viewerWho, zone: viewTz });
+		if (cHost) parties.push({ who: cHost.self ? 'You' : cHost.name, zone: cHost.timezone });
+		return zoneRows(s, e, parties);
+	});
+
+	/** The appointment's start, for zone offsets: the offset on that date, not today's (DST). */
+	const cAt = $derived(fromInput(cStart, cTz || viewTz) ?? DateTime.now());
+
+	/** Re-express start and end in a new zone, keeping the instants. */
+	function setCreateZone(z: string) {
+		if (!z || !IANAZone.isValidZone(z) || z === cTz) return;
+		const s = fromInput(cStart, cTz);
+		const e = fromInput(cEnd, cTz);
+		cTz = z;
+		if (s) cStart = toInput(s, z);
+		if (e) cEnd = toInput(e, z);
+	}
+
+	async function addPerson() {
+		cPeople = [...cPeople, { name: '', email: '' }];
+		await tick();
+		document.getElementById(`c-person-name-${cPeople.length - 1}`)?.focus();
+	}
+
+	function removePerson(i: number) {
+		cPeople = cPeople.filter((_, j) => j !== i);
+	}
 
 	// Any change to what is being booked makes a shown conflict list stale.
 	$effect(() => {
@@ -412,8 +492,8 @@
 
 	function applyDefaultEnd() {
 		if (cMode !== 'appointment' || cEndManual || !cEventType) return;
-		const s = fromInput(cStart);
-		if (s) cEnd = toInput(s.plus({ minutes: cEventType.duration_minutes }));
+		const s = fromInput(cStart, cTz);
+		if (s) cEnd = toInput(s.plus({ minutes: cEventType.duration_minutes }), cTz);
 	}
 
 	function pickHost(id: string) {
@@ -422,7 +502,6 @@
 		cEventTypeId = h?.event_types[0]?.id ?? '';
 		const et = h?.event_types[0];
 		cConference = et && isOnlineMeeting(et.location_type) ? et.location_type : '';
-		if (!cTzTouched) cTz = h?.timezone || tz;
 		cSync = !!h?.has_calendar;
 		applyDefaultEnd();
 	}
@@ -435,13 +514,13 @@
 	}
 
 	function onStartChange(prev: string) {
-		const s = fromInput(cStart);
+		const s = fromInput(cStart, cTz);
 		if (!s) return;
 		if (cEndManual) {
 			// Keep the chosen length when the start moves.
-			const ps = fromInput(prev);
-			const pe = fromInput(cEnd);
-			if (ps && pe) cEnd = toInput(s.plus(pe.diff(ps)));
+			const ps = fromInput(prev, cTz);
+			const pe = fromInput(cEnd, cTz);
+			if (ps && pe) cEnd = toInput(s.plus(pe.diff(ps)), cTz);
 		} else {
 			applyDefaultEnd();
 		}
@@ -468,16 +547,15 @@
 			// A click selects exactly one slot; anything longer was a deliberate drag.
 			dragged = end.diff(start, 'minutes').minutes > 30;
 		}
-		cStart = toInput(start);
-		cEnd = toInput(end);
+		// The dialog starts in the zone the calendar is drawn in, so the times read the same
+		// as the range just selected; picking another zone re-expresses them.
+		cTz = viewTz;
+		cStart = toInput(start, cTz);
+		cEnd = toInput(end, cTz);
 		cEndManual = dragged;
-		cName = '';
-		cEmail = '';
-		cGuests = '';
+		cPeople = [{ name: '', email: '' }];
 		cTitle = '';
 		cError = '';
-		cTzTouched = false;
-		cTz = '';
 		cMode = 'appointment';
 		pickHost(defaultHostId());
 		cConflicts = null;
@@ -491,14 +569,10 @@
 
 	const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-	function parseGuests(raw: string): string[] {
-		return raw.split(/[\s,;]+/).map((g) => g.trim()).filter(Boolean);
-	}
-
 	async function submitCreate(force = false) {
 		cError = '';
-		const s = fromInput(cStart);
-		const e = fromInput(cEnd);
+		const s = fromInput(cStart, cTz);
+		const e = fromInput(cEnd, cTz);
 		if (!s || !e) { cError = 'Enter a valid start and end.'; return; }
 		if (e <= s) { cError = 'The end must be after the start.'; return; }
 		if (!cHostId) { cError = 'Pick a host.'; return; }
@@ -507,22 +581,22 @@
 		let body: Record<string, unknown>;
 		if (cMode === 'appointment') {
 			if (!cEventTypeId) { cError = 'Pick an event type.'; return; }
-			if (!cName.trim()) { cError = 'Attendee name is required.'; return; }
-			if (!EMAIL_RE.test(cEmail.trim())) { cError = 'Enter a valid attendee email.'; return; }
-			const zone = cTz.trim() || cHost?.timezone || tz;
-			if (!IANAZone.isValidZone(zone)) { cError = `Unknown time zone "${zone}".`; return; }
-			const guests = parseGuests(cGuests);
-			const bad = guests.find((g) => !EMAIL_RE.test(g));
-			if (bad) { cError = `"${bad}" is not a valid guest email.`; return; }
+			const [main, ...rest] = cPeople.map((p) => ({ name: p.name.trim(), email: p.email.trim() }));
+			if (!main?.name) { cError = "Enter the main contact's name."; return; }
+			if (!EMAIL_RE.test(main.email)) { cError = "Enter a valid email for the main contact."; return; }
+			const guests = rest.filter((p) => p.name || p.email);
+			const bad = guests.find((p) => !EMAIL_RE.test(p.email));
+			if (bad) { cError = bad.email ? `"${bad.email}" is not a valid email.` : `Enter an email for ${bad.name}.`; return; }
+			if (!IANAZone.isValidZone(cTz)) { cError = 'Pick a time zone.'; return; }
 			path = '/v1/staff/bookings';
 			body = {
 				host_id: cHostId,
 				event_type_id: cEventTypeId,
 				start_at: toUtcIso(s),
 				end_at: toUtcIso(e),
-				name: cName.trim(),
-				email: cEmail.trim(),
-				timezone: zone
+				name: main.name,
+				email: main.email,
+				timezone: cTz
 			};
 			if (guests.length) body.guests = guests;
 			if (cShowConference && cConference) body.conference = cConference;
@@ -646,6 +720,7 @@
 		const p = info.event.extendedProps as ItemProps;
 		if (p.kind === 'booking') {
 			dBooking = p.booking;
+			resetAddPerson();
 			detailsOpen = true;
 		} else if (p.kind === 'block') {
 			bBlock = p.block;
@@ -759,6 +834,78 @@
 		});
 	}
 
+	/** The appointment in the calendar's zone, the attendees' zone and each host's. */
+	const dZoneRows = $derived.by(() => {
+		const b = dBooking;
+		if (!b) return [];
+		const parties: { who: string; zone?: string }[] = [
+			{ who: viewerWho, zone: viewTz },
+			{ who: 'Attendees', zone: b.attendee_timezone }
+		];
+		for (const id of b.host_ids) {
+			const h = hosts.find((x) => x.id === id);
+			if (h) parties.push({ who: h.self ? 'You' : h.name, zone: h.timezone });
+		}
+		return zoneRows(DateTime.fromISO(b.start_at), DateTime.fromISO(b.end_at), parties);
+	});
+
+	/** Main contact first, then the guests, as one list. */
+	const dPeople = $derived.by(() => {
+		const b = dBooking;
+		if (!b) return [];
+		const guests = b.guest_list ?? (b.guests ?? []).map((email) => ({ name: '', email }));
+		return [{ name: b.attendee_name, email: b.attendee_email, main: true }, ...guests.map((g) => ({ ...g, main: false }))];
+	});
+
+	const dCanAdd = $derived(
+		!!dBooking && dBooking.can_manage && dBooking.status === 'confirmed' && DateTime.fromISO(dBooking.end_at) > DateTime.now()
+	);
+
+	// Add an attendee to an existing appointment: they are invited straight away.
+	let aOpen = $state(false);
+	let aName = $state('');
+	let aEmail = $state('');
+	let aBusy = $state(false);
+	let aError = $state('');
+
+	function resetAddPerson() {
+		aOpen = false;
+		aName = '';
+		aEmail = '';
+		aError = '';
+	}
+
+	async function openAddPerson() {
+		resetAddPerson();
+		aOpen = true;
+		await tick();
+		document.getElementById('a-name')?.focus();
+	}
+
+	async function addAttendee() {
+		const b = dBooking;
+		if (!b) return;
+		aError = '';
+		const email = aEmail.trim();
+		if (!EMAIL_RE.test(email)) { aError = 'Enter a valid email.'; return; }
+		aBusy = true;
+		try {
+			const res = await api.post<{ guests?: { name: string; email: string }[]; warning?: string; invited_via?: string }>(
+				`/v1/bookings/${b.id}/guests`, { name: aName.trim(), email }
+			);
+			const list = res?.guests ?? [...(b.guest_list ?? []), { name: aName.trim(), email }];
+			dBooking = { ...b, guest_list: list, guests: list.map((g) => g.email) };
+			if (res?.warning) toast.warning(res.warning);
+			else toast.success(res?.invited_via === 'calendar' ? 'Attendee added and invited from the calendar' : 'Attendee added and emailed an invitation');
+			resetAddPerson();
+			refetch();
+		} catch (e: any) {
+			aError = e?.message || 'Could not add the attendee';
+		} finally {
+			aBusy = false;
+		}
+	}
+
 	const isUrl = (s: string) => /^https?:\/\//i.test(s);
 </script>
 
@@ -770,8 +917,24 @@
 		<p class="mt-1 text-sm text-muted-foreground">
 			Drag across a time to book an appointment or block it off. Drag an appointment to move it.
 		</p>
+		<p class="mt-1 text-sm">
+			All times on this calendar are in <span class="font-medium">{zoneLabel(viewTz)}</span>{#if viewTz !== profileTz}<span class="text-muted-foreground">, not your profile zone ({zoneLabel(profileTz)})</span>{/if}.
+		</p>
 	</div>
-	<div class="flex shrink-0 items-center gap-2">
+	<div class="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:shrink-0">
+		<div class="flex w-full items-center gap-1.5 sm:w-auto" title="Time zone the calendar is shown in">
+			<GlobeIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+			<span class="sr-only">Time zone</span>
+			<Combobox
+				class="min-w-0 flex-1 sm:w-64 sm:flex-none"
+				items={ZONE_ITEMS}
+				bind:value={() => viewTz, setViewTz}
+				searchPlaceholder="Search by city, region or offset…"
+			/>
+		</div>
+		{#if viewTz !== profileTz}
+			<Button variant="ghost" size="sm" onclick={() => setViewTz(profileTz)}>Use my zone</Button>
+		{/if}
 		{#if multiHost}
 			<Popover.Root>
 				<Popover.Trigger class={buttonVariants({ variant: 'outline', size: 'sm' })} aria-label="Choose hosts">
@@ -847,7 +1010,7 @@
 {#if loadingHosts}
 	<p class="py-8 text-sm text-muted-foreground">Loading…</p>
 {/if}
-<div class="schedule-cal" class:hidden={loadingHosts || !!hostsError}>
+<div class="schedule-cal" class:hidden={loadingHosts || !!hostsError} style="--cn-tz-corner: '{cornerLabel(viewTz)}'">
 	<div bind:this={calendarEl} class="h-full"></div>
 </div>
 
@@ -856,7 +1019,7 @@
 	<Dialog.Content class="max-h-[90vh] max-w-lg overflow-y-auto">
 		<Dialog.Header>
 			<Dialog.Title>{cMode === 'appointment' ? 'New appointment' : 'Block time'}</Dialog.Title>
-			<Dialog.Description>Times are in {tz}.</Dialog.Description>
+			<Dialog.Description>Start and end are in {zoneLabel(cTz || viewTz, cAt)}.</Dialog.Description>
 		</Dialog.Header>
 
 		<div class="inline-flex w-fit rounded-md border p-0.5 text-sm" role="tablist">
@@ -865,18 +1028,32 @@
 		</div>
 
 		<div class="grid gap-4">
+			<div class="space-y-1.5">
+				<Label>Time zone</Label>
+				<Combobox
+					items={ZONE_ITEMS}
+					bind:value={() => cTz, setCreateZone}
+					searchPlaceholder="Search by city, region or offset…"
+				/>
+				{#if cMode === 'appointment'}
+					<p class="text-xs text-muted-foreground">The attendees' time zone: their emails and invites show times in it.</p>
+				{/if}
+			</div>
 			<div class="grid gap-3 sm:grid-cols-2">
 				<div class="space-y-1.5">
-					<Label for="c-start">Start</Label>
+					<Label for="c-start">Start <span class="font-normal text-muted-foreground">({zoneOffset(cTz || viewTz, cAt)})</span></Label>
 					<Input id="c-start" type="datetime-local" value={cStart}
 						onchange={(e) => { const prev = cStart; cStart = e.currentTarget.value; onStartChange(prev); }} />
 				</div>
 				<div class="space-y-1.5">
-					<Label for="c-end">End</Label>
+					<Label for="c-end">End <span class="font-normal text-muted-foreground">({zoneOffset(cTz || viewTz, cAt)})</span></Label>
 					<Input id="c-end" type="datetime-local" value={cEnd}
 						onchange={(e) => { cEnd = e.currentTarget.value; cEndManual = true; }} />
 				</div>
 			</div>
+			{#if cZoneRows.length > 0}
+				{@render zoneTable(cZoneRows)}
+			{/if}
 
 			{#if hosts.length > 1}
 				<div class="space-y-1.5">
@@ -916,30 +1093,32 @@
 					</div>
 				{/if}
 
-				<div class="grid gap-3 sm:grid-cols-2">
-					<div class="space-y-1.5">
-						<Label for="c-name">Attendee name</Label>
-						<Input id="c-name" bind:value={cName} autocomplete="off" />
+				<fieldset class="space-y-2">
+					<legend class="text-sm font-medium">Attendees</legend>
+					{#each cPeople as person, i (i)}
+						<div class="flex items-start gap-2">
+							<div class="grid flex-1 gap-2 sm:grid-cols-2">
+								<Input id="c-person-name-{i}" bind:value={person.name} autocomplete="off"
+									placeholder={i === 0 ? 'Name' : 'Name (optional)'} aria-label="Attendee {i + 1} name" />
+								<Input id="c-person-email-{i}" type="email" bind:value={person.email} autocomplete="off"
+									placeholder="Email" aria-label="Attendee {i + 1} email" />
+							</div>
+							{#if i === 0}
+								<span class="mt-1.5 w-8 shrink-0 text-center text-[0.625rem] leading-tight text-muted-foreground" title="Gets the confirmation with the reschedule and cancel link">main</span>
+							{:else}
+								<Button variant="ghost" size="icon-sm" class="mt-0.5 shrink-0" onclick={() => removePerson(i)} aria-label="Remove attendee {i + 1}">
+									<XIcon class="size-4" />
+								</Button>
+							{/if}
+						</div>
+					{/each}
+					<div class="flex flex-wrap items-center justify-between gap-2">
+						<Button variant="outline" size="sm" onclick={addPerson} disabled={cPeople.length > 50}>
+							<PlusIcon class="size-4" /> Add attendee
+						</Button>
+						<p class="text-xs text-muted-foreground">The first person gets the confirmation with the reschedule link; everyone is invited.</p>
 					</div>
-					<div class="space-y-1.5">
-						<Label for="c-email">Attendee email</Label>
-						<Input id="c-email" type="email" bind:value={cEmail} autocomplete="off" />
-					</div>
-				</div>
-
-				<div class="space-y-1.5">
-					<Label for="c-tz">Attendee time zone</Label>
-					<Input id="c-tz" list="schedule-zones" bind:value={cTz} placeholder={cHost?.timezone || tz}
-						oninput={() => (cTzTouched = true)} />
-					<datalist id="schedule-zones">
-						{#each ALL_ZONES as z}<option value={z}></option>{/each}
-					</datalist>
-				</div>
-
-				<div class="space-y-1.5">
-					<Label for="c-guests">Guests <span class="font-normal text-muted-foreground">(optional)</span></Label>
-					<Input id="c-guests" bind:value={cGuests} placeholder="guest@example.com, other@example.com" />
-				</div>
+				</fieldset>
 
 				{#if cShowConference}
 					<div class="space-y-1.5">
@@ -1038,22 +1217,43 @@
 			{@const b = dBooking}
 			<Dialog.Header>
 				<Dialog.Title>{b.event_type_name}</Dialog.Title>
-				<Dialog.Description>{fmtRange(b.start_at, b.end_at)}</Dialog.Description>
+				<Dialog.Description>{fmtRange(b.start_at, b.end_at)} · {zoneLabel(viewTz, DateTime.fromISO(b.start_at))}</Dialog.Description>
 			</Dialog.Header>
+			{#if dZoneRows.length > 1}
+				{@render zoneTable(dZoneRows)}
+			{/if}
 			<dl class="space-y-2 text-sm">
 				<div class="flex gap-4">
-					<dt class="w-24 shrink-0 font-medium">Attendee</dt>
-					<dd class="min-w-0 text-muted-foreground">
-						{b.attendee_name || '—'}
-						{#if b.attendee_email}<br /><a href="mailto:{b.attendee_email}" class="break-all text-primary hover:underline">{b.attendee_email}</a>{/if}
+					<dt class="w-24 shrink-0 font-medium">Attendees</dt>
+					<dd class="min-w-0 flex-1 text-muted-foreground">
+						<ul class="space-y-1">
+							{#each dPeople as person (person.email)}
+								<li class="min-w-0">
+									{#if person.name}<span class="text-foreground">{person.name}</span>{/if}
+									<a href="mailto:{person.email}" class="break-all text-primary hover:underline">{person.email}</a>
+									{#if person.main}<span class="ml-1 rounded bg-muted px-1 py-0.5 text-[0.625rem] uppercase tracking-wide" title="Gets the confirmation with the reschedule and cancel link">main</span>{/if}
+								</li>
+							{/each}
+						</ul>
+						{#if dCanAdd}
+							{#if aOpen}
+								<form class="mt-2 grid gap-2" onsubmit={(e) => { e.preventDefault(); addAttendee(); }}>
+									<Input id="a-name" bind:value={aName} placeholder="Name (optional)" autocomplete="off" aria-label="New attendee name" />
+									<Input id="a-email" type="email" bind:value={aEmail} placeholder="Email" autocomplete="off" aria-label="New attendee email" />
+									{#if aError}<p class="text-xs text-destructive">{aError}</p>{/if}
+									<div class="flex gap-2">
+										<Button type="submit" size="sm" disabled={aBusy}>{aBusy ? 'Adding…' : 'Add and invite'}</Button>
+										<Button type="button" variant="ghost" size="sm" onclick={resetAddPerson} disabled={aBusy}>Cancel</Button>
+									</div>
+								</form>
+							{:else}
+								<Button variant="outline" size="sm" class="mt-2" onclick={openAddPerson}>
+									<PlusIcon class="size-4" /> Add attendee
+								</Button>
+							{/if}
+						{/if}
 					</dd>
 				</div>
-				{#if b.guests && b.guests.length > 0}
-					<div class="flex gap-4">
-						<dt class="w-24 shrink-0 font-medium">Guests</dt>
-						<dd class="min-w-0 break-all text-muted-foreground">{b.guests.join(', ')}</dd>
-					</div>
-				{/if}
 				<div class="flex gap-4">
 					<dt class="w-24 shrink-0 font-medium">{b.host_ids.length > 1 ? 'Hosts' : 'Host'}</dt>
 					<dd class="min-w-0 text-muted-foreground">{dHostNames}</dd>
@@ -1090,7 +1290,7 @@
 			<Dialog.Header>
 				<Dialog.Title>Unavailable block</Dialog.Title>
 				<Dialog.Description>
-					{fmtRange(bBlock.start_at, bBlock.end_at)}{#if multiHost} · {hostName(bBlock.host_id)}{/if}
+					{fmtRange(bBlock.start_at, bBlock.end_at)} · {zoneLabel(viewTz, DateTime.fromISO(bBlock.start_at))}{#if multiHost} · {hostName(bBlock.host_id)}{/if}
 				</Dialog.Description>
 			</Dialog.Header>
 			<div class="grid gap-4">
@@ -1126,6 +1326,17 @@
 		{/if}
 	</Dialog.Content>
 </Dialog.Root>
+
+{#snippet zoneTable(rows: ZoneRow[])}
+	<dl class="grid gap-1.5 rounded-md border bg-muted/40 px-3 py-2 text-xs">
+		{#each rows as r (r.zone)}
+			<div class="flex flex-wrap items-baseline justify-between gap-x-3">
+				<dt class="text-muted-foreground"><span class="font-medium text-foreground">{r.who}</span> · {r.label}</dt>
+				<dd class="font-medium tabular-nums">{r.when}</dd>
+			</div>
+		{/each}
+	</dl>
+{/snippet}
 
 <ConfirmDialog
 	bind:open={confirmOpen}
@@ -1201,15 +1412,19 @@
 		background-color: var(--background);
 		border-color: var(--border);
 	}
-	/* The zone name in the toolbar is a label, not a button. */
-	.schedule-cal :global(.fc .fc-tzLabel-button),
-	.schedule-cal :global(.fc .fc-tzLabel-button:hover),
-	.schedule-cal :global(.fc .fc-tzLabel-button:active) {
-		pointer-events: none;
-		background: transparent;
-		border-color: transparent;
+	/* The zone's UTC offset in the corner above the hour labels, as in Google Calendar. */
+	.schedule-cal :global(.fc .fc-scrollgrid-section-header .fc-timegrid-axis-frame) {
+		align-items: flex-end;
+		justify-content: center;
+	}
+	.schedule-cal :global(.fc .fc-scrollgrid-section-header .fc-timegrid-axis-frame)::after {
+		content: var(--cn-tz-corner);
+		white-space: pre;
+		padding: 0 2px 2px;
+		font-size: 0.625rem;
+		line-height: 1.1;
+		text-align: center;
 		color: var(--muted-foreground);
-		font-size: 0.75rem;
 	}
 	.schedule-cal :global(.fc .fc-col-header-cell-cushion),
 	.schedule-cal :global(.fc .fc-daygrid-day-number) {

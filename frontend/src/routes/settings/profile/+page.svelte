@@ -1,7 +1,8 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { api, type User } from '$lib/api';
-	import { prefs, prefsFromUser, TIMEZONES, WEEK_DAYS } from '$lib/prefs';
+	import { prefs, prefsFromUser, WEEK_DAYS } from '$lib/prefs';
+	import { zoneItems, zoneLabel } from '$lib/timezones';
 	import { currentUser } from '$lib/stores';
 	import { Button } from '$lib/components/ui/button';
 	import { Input } from '$lib/components/ui/input';
@@ -237,12 +238,15 @@
 				<div class="space-y-1.5">
 					<Label for="timezone">Timezone</Label>
 					<Combobox
-						items={TIMEZONES.map((tz) => ({ value: tz, label: tz }))}
+						items={zoneItems([timezone])}
 						bind:value={timezone}
 						placeholder="Select timezone…"
-						searchPlaceholder="Search timezones…"
+						searchPlaceholder="Search by city, region or offset…"
 					/>
-					<p class="text-xs text-muted-foreground">Used when computing available slots for your booking pages.</p>
+					<p class="text-xs text-muted-foreground">
+						Used when computing available slots for your booking pages. The Schedule and Bookings pages
+						and your booking emails show times in this zone{timezone ? `: ${zoneLabel(timezone)}` : ''}.
+					</p>
 				</div>
 
 				<div class="space-y-1.5">
