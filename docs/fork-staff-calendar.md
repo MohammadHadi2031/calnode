@@ -37,7 +37,7 @@ All endpoints need auth. Times are RFC3339; the server returns UTC.
 | `GET /v1/users/me` | any | | adds `secretary_for: [host_id]` |
 | `GET /v1/staff/hosts` | any | | `{hosts:[{id,name,email,timezone,avatar_url,self,has_calendar,event_types:[{id,slug,name,duration_minutes,location_type,allow_conference_choice}]}]}`: the hosts the caller can manage, with their active event types |
 | `GET /v1/staff/calendar` | any | `from`, `to` (RFC3339, at most 62 days apart), `host_ids` (comma list; default: every manageable host), `external=1` to include calendar busy | `{bookings:[…], unavailable:[…], busy:[…], busy_errors:[…]}`, see below |
-| `POST /v1/staff/bookings` | manager of `host_id` | `{host_id,event_type_id,start_at,end_at?,name,email,timezone?,guests?:[email],conference?,force?}` | `201` booking JSON; `409 {error:"conflicts",conflicts:[…]}` unless `force` |
+| `POST /v1/staff/bookings` | manager of `host_id` | `{host_id,event_type_id,start_at,end_at?,name,email,timezone?,guests?:[email \| {name,email}],conference?,force?}` | `201` booking JSON; `409 {error:"conflicts",conflicts:[…]}` unless `force` |
 | `PATCH /v1/staff/bookings/{id}` | manager of the booking's primary host | `{start_at,end_at?,force?}` (`end_at` defaults to start + the current length) | `200` booking JSON; `409` conflicts unless `force` |
 | `POST /v1/staff/bookings/{id}/cancel` | manager of the primary host | `{reason?}` | `200` booking JSON |
 | `POST /v1/unavailable-blocks` | manager of `host_id` | `{host_id,start_at,end_at,title?,sync_to_calendar?:true,force?}` | `201` block; `409` conflicts (an overlapping booking) unless `force` |
@@ -51,10 +51,10 @@ Calendar items:
 ```
 booking:     {id, event_type_id, event_type_name, primary_host_id, host_ids:[…], start_at, end_at,
               status, location_type, location_value, attendee_name, attendee_email,
-              guests:[email], can_manage}
+              attendee_timezone, guests:[email], guest_list:[{name,email}], can_manage}
 unavailable: {id, host_id, start_at, end_at, title, sync_to_calendar, synced}
 busy:        {host_id, start_at, end_at}      // external calendar busy, minus Calnode's own events and blocks
-busy_errors: {host_id, error}
+busy_errors: {host_id, error}   // error says why: no mailbox, consent needed, network…
 ```
 
 Conflicts (`409`):
@@ -73,3 +73,13 @@ Staff bookings follow the event type's routing, with three differences:
 - `force` also skips the double-booking check.
 
 Confirmations, invites, Meet/Teams links and reminders work the same as for a public booking.
+
+## Time zones on the page
+
+- The calendar is drawn in the viewer's profile zone. The picker in the header switches the view to any IANA zone for this browser; "Use my zone" switches back. The header sentence and the grid's top-left corner always name the zone in use.
+- The new-appointment dialog has its own **time zone**, which starts as the view's zone. Start and end are entered in it, and it is sent as the booking's `timezone`, so the attendees' emails and invites use it. Changing it keeps the selected instant and re-expresses the times. Below the times, one line per distinct zone shows the attendees', the viewer's and the host's local time. Offsets are taken on the appointment's date, so DST is right.
+- The appointment popup shows the same lines from `attendee_timezone` and each host's zone.
+
+## Attendees
+
+The dialog has one **Attendees** list with **Add attendee**. The first person is the main contact: they are the booking's organizer and get the confirmation with the reschedule and cancel link. Everyone after them is sent as a guest with their name. The popup lists everyone the same way and offers **Add attendee** on upcoming confirmed appointments the viewer manages. That button calls `POST /v1/bookings/{id}/guests` (docs/fork-host-guests.md), which a secretary of the booking's primary host may now use as well.

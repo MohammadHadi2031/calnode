@@ -338,7 +338,7 @@ func (h *Handler) GetConnectionCalendars(w http.ResponseWriter, r *http.Request)
 			return
 		}
 		h.logger.ErrorContext(r.Context(), "list connection calendars", "error", err)
-		h.writeError(w, http.StatusBadGateway, "could not reach the calendar provider")
+		h.writeError(w, http.StatusBadGateway, calendar.UserMessage(err))
 		return
 	}
 	if cals == nil {

@@ -2,6 +2,8 @@
 	import { onMount } from 'svelte';
 	import { api, type TeamMember, type Invite, type UpcomingBooking, type SecretaryAssignment } from '$lib/api';
 	import { currentUser } from '$lib/stores';
+	import { prefs, fmtDateTime as prefsDateTime } from '$lib/prefs';
+	import { resolveZone, zoneCity } from '$lib/timezones';
 	import { Button } from '$lib/components/ui/button';
 	import { ConfirmDialog } from '$lib/components/ui/confirm-dialog';
 	import * as Dialog from '$lib/components/ui/dialog';
@@ -356,7 +358,8 @@
 		return new Date(iso).toLocaleDateString(undefined, { dateStyle: 'medium' });
 	}
 	function fmtDateTime(iso: string) {
-		return new Date(iso).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
+		// The viewer's profile zone, named, not the browser's.
+		return `${prefsDateTime(iso, $prefs)} (${zoneCity(resolveZone($prefs.timezone))})`;
 	}
 	function daysLeft(iso: string) {
 		const diff = new Date(iso).getTime() - Date.now();
