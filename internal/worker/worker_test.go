@@ -438,6 +438,42 @@ func TestWorker_gracefulShutdown_waitIsIdempotent(t *testing.T) {
 	}
 }
 
+// A delivery queued before its webhook was paused is not sent: it is closed as not
+// delivered, and the job finishes instead of retrying.
+func TestWorker_doesNotSendForPausedWebhook(t *testing.T) {
+	database, svc := setup(t)
+	ctx := context.Background()
+
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	wh, _, err := svc.Create(ctx, "host-03", srv.URL, []string{"booking.created"})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	svc.Enqueue(ctx, "booking.created", webhook.BookingPayload{HostID: "host-03", Status: "confirmed"})
+	off := false
+	if err := svc.Update(ctx, "host-03", wh.ID, nil, nil, &off); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+
+	newWorker(t, database, svc).Poll(ctx)
+
+	if hits != 0 {
+		t.Errorf("endpoint called %d times; want 0 for a paused webhook", hits)
+	}
+	var delivStatus, jobStatus string
+	database.QueryRowContext(ctx, `SELECT status FROM webhook_deliveries WHERE webhook_id = ?`, wh.ID).Scan(&delivStatus)
+	database.QueryRowContext(ctx, `SELECT status FROM jobs WHERE type = 'webhook.deliver'`).Scan(&jobStatus)
+	if delivStatus != "failed" || jobStatus != "done" {
+		t.Errorf("delivery %q, job %q; want failed (not sent) and done", delivStatus, jobStatus)
+	}
+}
+
 func TestWorker_skipsJobForDeletedWebhook(t *testing.T) {
 	database, svc := setup(t)
 	ctx := context.Background()

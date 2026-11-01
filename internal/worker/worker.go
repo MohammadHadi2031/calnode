@@ -468,18 +468,31 @@ func (w *Worker) deliverWebhook(ctx context.Context, jobPayload string) error {
 		event           string
 		webhookURL      string
 		secretEnc       string
+		isActive        int
 	)
 	err := w.db.QueryRowContext(ctx, `
-		SELECT d.payload, d.event, wh.url, wh.secret_enc
+		SELECT d.payload, d.event, wh.url, wh.secret_enc, wh.is_active
 		FROM webhook_deliveries d
 		JOIN webhooks wh ON wh.id = d.webhook_id
 		WHERE d.id = ?`, p.WebhookDeliveryID).
-		Scan(&deliveryPayload, &event, &webhookURL, &secretEnc)
+		Scan(&deliveryPayload, &event, &webhookURL, &secretEnc, &isActive)
 	if err == sql.ErrNoRows {
 		return nil // delivery or webhook deleted; skip silently
 	}
 	if err != nil {
 		return fmt.Errorf("worker: fetch delivery: %w", err)
+	}
+	if isActive == 0 {
+		// Paused after this was queued (or while it was retrying). Pausing means "stop
+		// sending now", so close the delivery as not sent rather than leaving it pending
+		// forever or sending it anyway. Resuming does not replay it.
+		if _, uerr := w.db.ExecContext(ctx,
+			`UPDATE webhook_deliveries SET status = 'failed' WHERE id = ? AND status = 'pending'`,
+			p.WebhookDeliveryID); uerr != nil {
+			w.logger.Error("worker: close delivery for paused webhook", "error", uerr, "delivery_id", p.WebhookDeliveryID)
+		}
+		w.logger.Info("worker: webhook paused; delivery not sent", "delivery_id", p.WebhookDeliveryID)
+		return nil
 	}
 
 	secret, err := w.svc.DecryptSecret(secretEnc)
