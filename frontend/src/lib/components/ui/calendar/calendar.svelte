@@ -1,16 +1,25 @@
 <script lang="ts">
 	import { Calendar as CalendarPrimitive } from 'bits-ui';
+	import { getLocalTimeZone, isSameDay, today, type DateValue } from '@internationalized/date';
 	import { cn } from '$lib/utils.js';
 
 	let {
 		value = $bindable(),
 		onValueChange,
 		weekStartsOn = 1,
+		timeZone = undefined,
 		class: className,
 		...restProps
 		// bits-ui v2 only exposes the union RootProps; this component is always type="single",
 		// so derive the single-date variant (drop `type`, which we set below).
-	}: Omit<Extract<CalendarPrimitive.RootProps, { type: 'single' }>, 'type'> & { class?: string } = $props();
+	}: Omit<Extract<CalendarPrimitive.RootProps, { type: 'single' }>, 'type'> & {
+		class?: string;
+		/** IANA zone whose today is marked. bits-ui only knows the browser's, so we mark it here. */
+		timeZone?: string;
+	} = $props();
+
+	const todayDate = $derived(today(timeZone || getLocalTimeZone()));
+	const isToday = (d: DateValue) => isSameDay(d, todayDate);
 </script>
 
 <CalendarPrimitive.Root
@@ -64,7 +73,7 @@
 											'hover:bg-accent hover:text-accent-foreground',
 											'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
 											'data-selected:bg-primary data-selected:text-primary-foreground data-selected:hover:bg-primary data-selected:hover:text-primary-foreground',
-											'data-today:font-semibold data-today:underline data-today:underline-offset-2',
+											isToday(date) && 'font-semibold underline underline-offset-2',
 											'data-outside-month:text-muted-foreground data-outside-month:opacity-40',
 											'data-disabled:text-muted-foreground data-disabled:opacity-40 data-disabled:pointer-events-none',
 										)}

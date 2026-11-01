@@ -4,7 +4,13 @@
 	import { currentUser } from '$lib/stores';
 	import { prefs, fmtDateTime as prefsDateTime } from '$lib/prefs';
 	import { resolveZone, zoneCity } from '$lib/timezones';
-	import { Button } from '$lib/components/ui/button';
+	import { Button, buttonVariants } from '$lib/components/ui/button';
+	import * as Tooltip from '$lib/components/ui/tooltip';
+	import { DateTime } from 'luxon';
+	import UsersIcon from '@lucide/svelte/icons/users';
+	import KeyRoundIcon from '@lucide/svelte/icons/key-round';
+	import ArchiveIcon from '@lucide/svelte/icons/archive';
+	import CrownIcon from '@lucide/svelte/icons/crown';
 	import { ConfirmDialog } from '$lib/components/ui/confirm-dialog';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import { Input } from '$lib/components/ui/input';
@@ -318,8 +324,12 @@
 	}
 
 	// --- Password reset ---
-	function startReset(id: string) { resetTarget = id; resetPassword = ''; resetError = ''; resetOk = false; }
-	function cancelReset() { resetTarget = null; resetPassword = ''; resetError = ''; resetOk = false; }
+	// The reset form is a dialog: inline in the row it added an input and hid buttons, which
+	// reflowed every column of the table.
+	let resetOpen = $state(false);
+	const resetMember = $derived(members.find((m) => m.id === resetTarget));
+	function startReset(id: string) { resetTarget = id; resetPassword = ''; resetError = ''; resetOk = false; resetOpen = true; }
+	function cancelReset() { resetOpen = false; resetTarget = null; resetPassword = ''; resetError = ''; resetOk = false; }
 
 	async function submitReset(userId: string) {
 		resetError = ''; resetOk = false;
@@ -328,7 +338,7 @@
 		try {
 			await api.post(`/v1/users/${userId}/password`, { password: resetPassword });
 			resetOk = true; resetPassword = '';
-			setTimeout(() => { resetTarget = null; resetOk = false; }, 2000);
+			setTimeout(() => { if (resetOk) cancelReset(); }, 1500);
 		} catch (e: any) { resetError = e.message; }
 		finally { resetting = false; }
 	}
@@ -355,7 +365,9 @@
 	}
 
 	function fmtDate(iso: string) {
-		return new Date(iso).toLocaleDateString(undefined, { dateStyle: 'medium' });
+		// The day in the viewer's profile zone, not the browser's (which can be a day off).
+		const dt = DateTime.fromISO(iso).setZone(resolveZone($prefs.timezone));
+		return dt.isValid ? dt.toFormat('d LLL yyyy') : iso;
 	}
 	function fmtDateTime(iso: string) {
 		// The viewer's profile zone, named, not the browser's.
@@ -474,6 +486,29 @@
 	</Dialog.Content>
 </Dialog.Root>
 
+<!-- Reset a member's password -->
+<Dialog.Root bind:open={resetOpen} onOpenChange={(o) => { if (!o) cancelReset(); }}>
+	<Dialog.Content class="max-w-sm">
+		<Dialog.Header>
+			<Dialog.Title>Reset password</Dialog.Title>
+			<Dialog.Description>Set a new password for {resetMember?.name ?? 'this member'}. It also turns on email sign-in for them.</Dialog.Description>
+		</Dialog.Header>
+		{#if resetOk}
+			<p class="rounded-md bg-green-50 px-3 py-2 text-sm font-medium text-green-700">Password updated.</p>
+		{:else}
+			<form class="grid gap-2" onsubmit={(e) => { e.preventDefault(); if (resetTarget) submitReset(resetTarget); }}>
+				<Label for="reset-pw">New password</Label>
+				<Input id="reset-pw" type="password" bind:value={resetPassword} autocomplete="new-password" />
+				{#if resetError}<p class="text-xs text-destructive">{resetError}</p>{/if}
+				<Dialog.Footer class="mt-2 gap-2">
+					<Button type="button" variant="outline" onclick={cancelReset} disabled={resetting}>Cancel</Button>
+					<Button type="submit" disabled={resetting}>{resetting ? 'Saving…' : 'Set password'}</Button>
+				</Dialog.Footer>
+			</form>
+		{/if}
+	</Dialog.Content>
+</Dialog.Root>
+
 <svelte:head><title>Members — Calnode</title></svelte:head>
 
 <div class="mb-8 flex items-center justify-between">
@@ -543,7 +578,9 @@
 				<p class="text-sm text-muted-foreground">No members yet.</p>
 			</div>
 		{:else}
-			<div class="rounded-lg border bg-card overflow-hidden">
+			<!-- Scrolls rather than clips: with overflow-hidden the row actions were cut off
+			     at ordinary desktop widths. -->
+			<div class="overflow-x-auto rounded-lg border bg-card">
 				<table class="w-full text-sm">
 					<thead>
 						<tr class="border-b">
@@ -578,7 +615,7 @@
 									</div>
 								</td>
 								<td class="px-4 py-3">
-									<div class="flex items-center gap-1.5">
+									<div class="flex flex-wrap items-center gap-1.5">
 										{#if canChangeRole(m)}
 											{#key roleRev}
 												<Select.Root type="single" value={m.role} onValueChange={(v) => pickRole(m, v)}>
@@ -626,10 +663,10 @@
 										{/each}
 									</div>
 								</td>
-								<td class="px-4 py-3 text-sm text-muted-foreground">{fmtDate(m.created_at)}</td>
+								<td class="whitespace-nowrap px-4 py-3 text-sm text-muted-foreground">{fmtDate(m.created_at)}</td>
 								{#if $currentUser?.is_admin}
 									<td class="px-4 py-3">
-										<div class="flex flex-wrap items-center justify-end gap-1">
+										<div class="flex items-center justify-end gap-1 whitespace-nowrap">
 											{#if m.archived}
 												{#if m.archived_by_name}
 													<span class="text-xs text-muted-foreground">Archived by {m.archived_by_name}</span>
@@ -639,36 +676,42 @@
 													<Button size="sm" variant="outline" class="h-7 text-xs" onclick={() => restoreMember(m)}>Restore</Button>
 												{/if}
 											{:else}
-												{#if resetTarget !== m.id}
-													<Button size="sm" variant="ghost" class="h-7 text-xs" onclick={() => openSecretary(m)}>Secretary for…</Button>
-												{/if}
-												{#if m.id === $currentUser.id}
-													<!-- Nothing else to do on your own row. -->
-												{:else if resetTarget === m.id}
-													<div class="flex items-center gap-1.5">
-														{#if resetOk}
-															<span class="text-xs text-green-600 font-medium">Password updated</span>
-														{:else}
-															<Input type="password" bind:value={resetPassword} placeholder="New password"
-																class="h-7 w-36 text-xs" onkeydown={(e) => e.key === 'Enter' && submitReset(m.id)} />
-															{#if resetError}<span class="text-xs text-destructive">{resetError}</span>{/if}
-															<Button size="sm" variant="outline" class="h-7 text-xs" onclick={() => submitReset(m.id)} disabled={resetting}>
-																{resetting ? '…' : 'Set'}
-															</Button>
-															<Button size="sm" variant="ghost" class="h-7 text-xs" onclick={cancelReset}>Cancel</Button>
+												<!-- Row actions are icon buttons with tooltips (the app's convention), so
+												     the column has one width and never wraps or clips. -->
+												<Tooltip.Provider>
+													<Tooltip.Root>
+														<Tooltip.Trigger class={buttonVariants({ variant: 'ghost', size: 'icon-sm' })} onclick={() => openSecretary(m)} aria-label="Secretary for… ({m.name})">
+															<UsersIcon class="size-4" />
+														</Tooltip.Trigger>
+														<Tooltip.Content>Secretary for…</Tooltip.Content>
+													</Tooltip.Root>
+													{#if m.id !== $currentUser.id}
+														{#if $currentUser.is_owner && !m.is_owner}
+															<Tooltip.Root>
+																<Tooltip.Trigger class={buttonVariants({ variant: 'ghost', size: 'icon-sm' })} onclick={() => confirmTransfer(m)} aria-label="Transfer ownership to {m.name}">
+																	<CrownIcon class="size-4" />
+																</Tooltip.Trigger>
+																<Tooltip.Content>Transfer ownership</Tooltip.Content>
+															</Tooltip.Root>
 														{/if}
-													</div>
-												{:else}
-													{#if $currentUser.is_owner && !m.is_owner}
-														<Button size="sm" variant="ghost" class="h-7 text-xs" onclick={() => confirmTransfer(m)}>Transfer ownership</Button>
+														<!-- Reset password + Archive only on members this viewer may manage:
+														     never the owner; another admin only if the viewer is the owner. -->
+														{#if !m.is_owner && (!m.is_admin || $currentUser.is_owner)}
+															<Tooltip.Root>
+																<Tooltip.Trigger class={buttonVariants({ variant: 'ghost', size: 'icon-sm' })} onclick={() => startReset(m.id)} aria-label="Reset password for {m.name}">
+																	<KeyRoundIcon class="size-4" />
+																</Tooltip.Trigger>
+																<Tooltip.Content>Reset password</Tooltip.Content>
+															</Tooltip.Root>
+															<Tooltip.Root>
+																<Tooltip.Trigger class="{buttonVariants({ variant: 'ghost', size: 'icon-sm' })} text-destructive hover:text-destructive" onclick={() => startArchive(m)} aria-label="Archive {m.name}">
+																	<ArchiveIcon class="size-4" />
+																</Tooltip.Trigger>
+																<Tooltip.Content>Archive</Tooltip.Content>
+															</Tooltip.Root>
+														{/if}
 													{/if}
-													<!-- Reset password + Archive only on members this viewer may manage:
-													     never the owner; another admin only if the viewer is the owner. -->
-													{#if !m.is_owner && (!m.is_admin || $currentUser.is_owner)}
-														<Button size="sm" variant="ghost" class="h-7 text-xs" onclick={() => startReset(m.id)}>Reset password</Button>
-														<Button size="sm" variant="ghost" class="h-7 text-xs text-destructive hover:text-destructive" onclick={() => startArchive(m)}>Archive</Button>
-													{/if}
-												{/if}
+												</Tooltip.Provider>
 											{/if}
 										</div>
 									</td>

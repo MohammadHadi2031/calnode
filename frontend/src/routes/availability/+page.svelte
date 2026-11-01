@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { api, type AvailabilityRule, type AvailabilityOverride } from '$lib/api';
-	import { prefs, fmtDate } from '$lib/prefs';
+	import { prefs, fmtDate, profileZone } from '$lib/prefs';
 	import { Button, buttonVariants } from '$lib/components/ui/button';
 	import { ConfirmDialog } from '$lib/components/ui/confirm-dialog';
 	import { Badge } from '$lib/components/ui/badge';
@@ -502,12 +502,12 @@
 			<div class="flex flex-wrap items-end gap-3">
 				<div class="space-y-1.5">
 					<label for="ov-date" class="text-sm font-medium">Date</label>
-					<DatePicker bind:value={ovForm.date} placeholder="Pick a date" />
+					<DatePicker bind:value={ovForm.date} placeholder="Pick a date" timeZone={profileZone($prefs)} />
 				</div>
 				{#if ovForm.reason !== 'custom_hours'}
 					<div class="space-y-1.5">
 						<label for="ov-end-date" class="text-sm font-medium">To <span class="font-normal text-muted-foreground">(optional)</span></label>
-						<DatePicker bind:value={ovForm.end_date} placeholder="Same day" />
+						<DatePicker bind:value={ovForm.end_date} placeholder="Same day" timeZone={profileZone($prefs)} />
 					</div>
 				{/if}
 				<div class="space-y-1.5">

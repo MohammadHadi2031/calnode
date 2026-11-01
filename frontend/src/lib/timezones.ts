@@ -75,6 +75,21 @@ export function zoneLabel(zone: string, at?: DateTime): string {
 	return zone === 'UTC' ? 'UTC' : `${zone.replace(/_/g, ' ')} (${off})`;
 }
 
+/**
+ * The first offset change in [from, to), if any: the instant it takes effect and the
+ * offset after it. A label for a range of dates (a calendar week, a list of bookings)
+ * must not quote one offset across a DST change, so callers use this to say both.
+ */
+export function offsetChange(zone: string, from: DateTime, to: DateTime): { at: DateTime; offset: string } | null {
+	const start = from.setZone(zone).offset;
+	// Hourly is fine-grained enough: every real zone changes on an hour or half hour, and
+	// callers only name the day it happens. A 6-week month view is about 1,000 steps.
+	for (let t = from.toUTC().startOf('hour').plus({ hours: 1 }); t < to; t = t.plus({ hours: 1 })) {
+		if (t.setZone(zone).offset !== start) return { at: t.setZone(zone), offset: zoneOffset(zone, t) };
+	}
+	return null;
+}
+
 export type ZoneItem = { value: string; label: string };
 
 /**

@@ -2,7 +2,7 @@
 	import { onMount } from 'svelte';
 	import { api, type Booking, type BookingEmail } from '$lib/api';
 	import { currentUser } from '$lib/stores';
-	import { prefs, fmtDateTime, fmtTime, fmtZone } from '$lib/prefs';
+	import { prefs, fmtDateTime, fmtTime, fmtZone, fmtOffsetAt, profileZone } from '$lib/prefs';
 	import { Button, buttonVariants } from '$lib/components/ui/button';
 	import { Badge } from '$lib/components/ui/badge';
 	import * as Tooltip from '$lib/components/ui/tooltip';
@@ -307,6 +307,12 @@
 		}
 	}
 
+	/** The reschedule icon toggles the panel, so the row's buttons never change. */
+	function toggleReschedule(b: Booking) {
+		if (reschedulingId === b.id) cancelReschedule();
+		else startReschedule(b);
+	}
+
 	function startReschedule(b: Booking) {
 		reschedulingId = b.id;
 		reschedulingSlug = b.event_type_slug ?? '';
@@ -332,7 +338,7 @@
 		slots = [];
 		selectedSlot = '';
 		try {
-			const tz = $prefs.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+			const tz = profileZone($prefs);
 			const res = await api.get<{ slots: { start: string; end: string }[] }>(
 				`/v1/event-types/${reschedulingSlug}/slots?from=${rescheduleDate}&to=${rescheduleDate}&tz=${encodeURIComponent(tz)}`
 			);
@@ -360,6 +366,15 @@
 	}
 
 	function fmt(iso: string) { return fmtDateTime(iso, $prefs); }
+	/**
+	 * The page header names the zone with today's offset. A booking on the other side of a
+	 * DST change was at a different offset, so it says its own ("UTC-04:00") after the time.
+	 */
+	const offsetNow = $derived(fmtOffsetAt(new Date().toISOString(), $prefs));
+	function offsetNote(iso: string): string {
+		const off = fmtOffsetAt(iso, $prefs);
+		return off && off !== offsetNow ? off : '';
+	}
 	function fmtSlotTime(iso: string) { return fmtTime(iso, $prefs); }
 	function fmtMoney(cents?: number, cur?: string) {
 		if (!cents) return '';
@@ -377,8 +392,8 @@
 
 <svelte:head><title>Bookings — Calnode</title></svelte:head>
 
-<div class="mb-8 flex items-start justify-between gap-4">
-	<div>
+<div class="mb-8 flex flex-wrap items-start justify-between gap-4">
+	<div class="min-w-0">
 		<h1 class="text-2xl font-semibold tracking-tight">Bookings</h1>
 		<p class="mt-1 text-sm text-muted-foreground">
 			{scope === 'all' ? 'All meetings across the workspace.' : 'Meetings you are hosting.'}
@@ -420,6 +435,11 @@
 			<button type="button" class="rounded px-3 py-1 transition-colors {timeFilter === 'upcoming' ? 'bg-muted font-medium' : 'text-muted-foreground hover:text-foreground'}" onclick={() => setTimeFilter('upcoming')}>Upcoming ({counts.upcoming})</button>
 			<button type="button" class="rounded px-3 py-1 transition-colors {timeFilter === 'past' ? 'bg-muted font-medium' : 'text-muted-foreground hover:text-foreground'}" onclick={() => setTimeFilter('past')}>Past ({counts.past})</button>
 		</div>
+		<!-- Clear sits on the left: appearing at the end of the right-aligned filters, it
+		     pushed every filter sideways the moment one was picked. -->
+		{#if hasFilters}
+			<Button variant="ghost" size="sm" onclick={clearFilters}>Clear filters</Button>
+		{/if}
 
 		<div class="ml-auto flex flex-wrap items-center gap-2">
 			<Select.Root type="single" bind:value={fEventType} onValueChange={reload}>
@@ -473,10 +493,6 @@
 					<Select.Item value="cancelled" label="Cancelled">Cancelled</Select.Item>
 				</Select.Content>
 			</Select.Root>
-
-			{#if hasFilters}
-				<Button variant="ghost" size="sm" onclick={clearFilters}>Clear</Button>
-			{/if}
 		</div>
 	</div>
 
@@ -492,16 +508,27 @@
 			{/if}
 		</div>
 	{:else}
-	<div class="rounded-lg border bg-card overflow-hidden">
-		<table class="w-full text-sm">
+	<!-- table-fixed with set column widths: with automatic widths every column resized to
+	     its content, so columns jumped between tabs, pages and when a row was expanded.
+	     Long values truncate (full text on hover) instead of widening their column. -->
+	<div class="overflow-x-auto rounded-lg border bg-card">
+		<table class="w-full min-w-[640px] table-fixed text-sm">
+			<colgroup>
+				<col />
+				{#if scope === 'all'}<col class="w-[17%]" />{/if}
+				<col class="w-[16%]" />
+				<col class="w-44" />
+				<col class="w-32" />
+				<col class="w-36" />
+			</colgroup>
 			<thead>
 				<tr class="border-b">
 					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Attendee</th>
 					{#if scope === 'all'}<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Host</th>{/if}
 					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Event</th>
-					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Start time <span class="font-normal">({fmtZone($prefs)})</span></th>
+					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground" title="In {fmtZone($prefs)}">Start time</th>
 					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Status</th>
-					<th class="px-4 pb-3 pt-3"></th>
+					<th class="px-3 pb-3 pt-3"><span class="sr-only">Actions</span></th>
 				</tr>
 			</thead>
 			<tbody class="divide-y">
@@ -509,15 +536,20 @@
 					<tr class="transition-colors hover:bg-muted/30">
 						<td class="px-4 py-3">
 							{#if b.attendees && b.attendees.length > 0}
-								<div class="font-medium">{b.attendees[0].name}</div>
-								<div class="text-xs text-muted-foreground">{b.attendees[0].email}</div>
+								<div class="truncate font-medium" title={b.attendees[0].name}>{b.attendees[0].name}</div>
+								<div class="truncate text-xs text-muted-foreground" title={b.attendees[0].email}>{b.attendees[0].email}</div>
 							{:else}
 								<span class="text-muted-foreground">—</span>
 							{/if}
 						</td>
-						{#if scope === 'all'}<td class="px-4 py-3 text-muted-foreground">{b.host_name || '—'}</td>{/if}
-						<td class="px-4 py-3 font-mono text-xs text-muted-foreground">{b.event_type_slug ?? '—'}</td>
-						<td class="px-4 py-3 text-muted-foreground">{fmt(b.start_at)}</td>
+						{#if scope === 'all'}<td class="truncate px-4 py-3 text-muted-foreground" title={b.host_name}>{b.host_name || '—'}</td>{/if}
+						<td class="truncate px-4 py-3 font-mono text-xs text-muted-foreground" title={b.event_type_slug}>{b.event_type_slug ?? '—'}</td>
+						<td class="px-4 py-3 text-muted-foreground">
+							<span class="whitespace-nowrap">{fmt(b.start_at)}</span>
+							{#if offsetNote(b.start_at)}
+								<span class="block text-xs" title="This date is on the other side of a daylight-saving change">{offsetNote(b.start_at)}</span>
+							{/if}
+						</td>
 						<td class="px-4 py-3">
 							<div class="flex flex-wrap items-center gap-1.5">
 								{#if b.status === 'confirmed'}
@@ -546,7 +578,7 @@
 								{/if}
 							</div>
 						</td>
-						<td class="px-4 py-3">
+						<td class="px-3 py-3">
 							<Tooltip.Provider>
 								<div class="flex items-center justify-end gap-1">
 									<Tooltip.Root>
@@ -565,32 +597,30 @@
 										<Tooltip.Content>{expandedId === b.id ? 'Hide details' : 'Show details'}</Tooltip.Content>
 									</Tooltip.Root>
 
+									<!-- The same icons in every state: the reschedule icon toggles its panel
+									     (shown pressed while open) rather than swapping itself for a wide
+									     "Cancel reschedule" button that pushed the others sideways. -->
 									{#if b.status === 'confirmed'}
-										{#if reschedulingId === b.id}
-											<Button variant="outline" size="sm" onclick={cancelReschedule}>
-												Cancel reschedule
-											</Button>
-										{:else}
-											<Tooltip.Root>
-												<Tooltip.Trigger
-													class={buttonVariants({ variant: 'ghost', size: 'icon' })}
-													onclick={() => startReschedule(b)}
-												>
-													<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
-												</Tooltip.Trigger>
-												<Tooltip.Content>Reschedule</Tooltip.Content>
-											</Tooltip.Root>
+										<Tooltip.Root>
+											<Tooltip.Trigger
+												class="{buttonVariants({ variant: 'ghost', size: 'icon' })} {reschedulingId === b.id ? 'bg-accent text-accent-foreground' : ''}"
+												onclick={() => toggleReschedule(b)}
+												aria-pressed={reschedulingId === b.id}
+											>
+												<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+											</Tooltip.Trigger>
+											<Tooltip.Content>{reschedulingId === b.id ? 'Close reschedule' : 'Reschedule'}</Tooltip.Content>
+										</Tooltip.Root>
 
-											<Tooltip.Root>
-												<Tooltip.Trigger
-													class={buttonVariants({ variant: 'ghost', size: 'icon' })}
-													onclick={() => requestCancel(b.id)}
-												>
-													<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-												</Tooltip.Trigger>
-												<Tooltip.Content>Cancel booking</Tooltip.Content>
-											</Tooltip.Root>
-										{/if}
+										<Tooltip.Root>
+											<Tooltip.Trigger
+												class={buttonVariants({ variant: 'ghost', size: 'icon' })}
+												onclick={() => requestCancel(b.id)}
+											>
+												<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+											</Tooltip.Trigger>
+											<Tooltip.Content>Cancel booking</Tooltip.Content>
+										</Tooltip.Root>
 									{/if}
 								</div>
 							</Tooltip.Provider>
@@ -660,7 +690,7 @@
 										<ul class="space-y-1 text-sm">
 											{#each guestsById[b.id] as g (g.email)}
 												<li>
-													{#if g.name}<span class="font-medium">{g.name}</span> · {/if}<span class="break-all text-muted-foreground">{g.email}</span>
+													{#if g.name}<span class="font-medium">{g.name}</span>{' · '}{/if}<span class="break-all text-muted-foreground">{g.email}</span>
 												</li>
 											{/each}
 										</ul>
@@ -713,7 +743,14 @@
 										<p class="text-sm text-muted-foreground">No emails recorded for this booking.</p>
 									{:else}
 										<div class="overflow-x-auto">
-											<table class="w-full text-sm">
+											<!-- Fixed columns, so the log lines up the same in every booking. -->
+											<table class="w-full min-w-[560px] table-fixed text-sm">
+												<colgroup>
+													<col class="w-44" />
+													<col class="w-28" />
+													<col />
+													<col class="w-40" />
+												</colgroup>
 												<tbody>
 													{#each emailsById[b.id] as e (e.id)}
 														<tr class="border-t first:border-t-0 align-top">
@@ -732,7 +769,7 @@
 																	<Badge class="border-transparent bg-destructive/10 text-destructive">{e.status}</Badge>
 																{/if}
 																{#if e.error}
-																	<p class="mt-1 max-w-md break-words text-xs text-destructive">{e.error}</p>
+																	<p class="mt-1 break-words text-xs text-destructive">{e.error}</p>
 																{/if}
 															</td>
 														</tr>
@@ -759,6 +796,7 @@
 												bind:value={rescheduleDate}
 												placeholder="Pick a date"
 												minToday
+												timeZone={profileZone($prefs)}
 												class="w-[180px]"
 											/>
 										</div>
@@ -790,16 +828,16 @@
 										<p class="mt-3 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{rescheduleError}</p>
 									{/if}
 
-									{#if selectedSlot}
-										<div class="mt-4 flex gap-2">
+									<div class="mt-4 flex gap-2">
+										{#if selectedSlot}
 											<Button onclick={confirmReschedule} disabled={rescheduling}>
 												{rescheduling ? 'Rescheduling…' : `Confirm — ${fmtSlotTime(selectedSlot)}`}
 											</Button>
-											<Button variant="outline" onclick={cancelReschedule}>
-												Cancel
-											</Button>
-										</div>
-									{/if}
+										{/if}
+										<Button variant="outline" onclick={cancelReschedule}>
+											Cancel
+										</Button>
+									</div>
 								</div>
 							</td>
 						</tr>

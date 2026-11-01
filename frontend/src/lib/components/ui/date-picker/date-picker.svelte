@@ -9,17 +9,20 @@
 		value = $bindable(''),
 		placeholder = 'Pick a date',
 		minToday = false,
+		timeZone = undefined,
 		class: className = '',
 	}: {
 		value?: string;
 		placeholder?: string;
 		minToday?: boolean;
+		/** IANA zone whose "today" is marked and used for minToday. Default: the browser's. */
+		timeZone?: string;
 		class?: string;
 	} = $props();
 
 	let open = $state(false);
 
-	const tz = getLocalTimeZone();
+	const tz = $derived(timeZone || getLocalTimeZone());
 
 	let calValue = $state<DateValue | undefined>(undefined);
 	$effect(() => {
@@ -30,8 +33,9 @@
 
 	function fmt(iso: string) {
 		try {
-			return parseDate(iso).toDate(tz).toLocaleDateString([], {
-				day: 'numeric', month: 'short', year: 'numeric'
+			// A calendar date, not an instant: format it as such so no zone can shift the day.
+			return parseDate(iso).toDate('UTC').toLocaleDateString([], {
+				day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC'
 			});
 		} catch { return iso; }
 	}
@@ -59,6 +63,7 @@
 			bind:value={calValue}
 			onValueChange={onCalChange}
 			{minValue}
+			timeZone={tz}
 		/>
 	</Popover.Content>
 </Popover.Root>
