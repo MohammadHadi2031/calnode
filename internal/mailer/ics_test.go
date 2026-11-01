@@ -202,3 +202,31 @@ func TestBuildICS_listsGuestsAndForGuestSwapsRecipient(t *testing.T) {
 		t.Error("guest ICS leaks the booker's manage link")
 	}
 }
+
+// A Google event emails nobody (wisegrid fork): Calnode's .ics is its invite, so it must
+// carry the event's UID, SEQUENCE and organizer, not the booking's own.
+func TestBuildICS_providerEventIdentity(t *testing.T) {
+	d := testBookingData()
+	d.ICSUID, d.ICSSequence = "abc123@google.com", 2
+	d.ICSOrganizerName, d.ICSOrganizerEmail = "Alice (Google)", "alice@team.example"
+	got := string(BuildICS(d, "REQUEST"))
+	for _, want := range []string{
+		"UID:abc123@google.com", "SEQUENCE:2",
+		"ORGANIZER;CN=\"Alice (Google)\":mailto:alice@team.example",
+		"ATTENDEE;CN=\"Bob Booker\";RSVP=TRUE:mailto:bob@example.com",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("ICS missing %q\n---\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "@calnode") || strings.Contains(got, "mailto:host@example.com") {
+		t.Errorf("ICS still carries the booking's own identity\n---\n%s", got)
+	}
+
+	// A co-host's copy lists them as an attendee of the shared event.
+	d.ICSHostAttendee = true
+	got = string(BuildICS(d, "REQUEST"))
+	if !strings.Contains(got, "ATTENDEE;CN=\"Alice Host\";RSVP=TRUE:mailto:host@example.com") {
+		t.Errorf("co-host copy missing the host as attendee\n---\n%s", got)
+	}
+}

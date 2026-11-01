@@ -1422,8 +1422,9 @@ func (h *Handler) hasDestination(ctx context.Context, gc *calendar.Service, user
 
 // notifyHosts emails each host that has host-booking notifications on. Returns the
 // primary host's notification prefs, for the caller's single attendee-confirmation send,
-// and whether any host email failed.
-func (h *Handler) notifyHosts(ctx context.Context, b *booking.Booking, bData mailer.BookingData, hosts []assignedHost, livekitHostURL string, sharedInvite bool) (hostPrefs, bool) {
+// and whether any host email failed. inv is the booking's quiet provider event, if any
+// (see applyHostProviderInvite).
+func (h *Handler) notifyHosts(ctx context.Context, b *booking.Booking, bData mailer.BookingData, hosts []assignedHost, livekitHostURL string, sharedInvite bool, inv *providerInvite) (hostPrefs, bool) {
 	primaryPrefs := allOnPrefs
 	confirmFailed := false
 	for _, host := range hosts {
@@ -1439,6 +1440,7 @@ func (h *Handler) notifyHosts(ctx context.Context, b *booking.Booking, bData mai
 			if sharedInvite {
 				hd.AttachICS = false // the shared event's provider invite already reached them
 			}
+			h.applyHostProviderInvite(ctx, &hd, host, inv)
 			if err := sendWithRetry(ctx, h.logger, b.ID, "host/"+host.UserID, func() error {
 				return mailer.SendConfirmationToHost(ctx, h.mailer, hd)
 			}); err != nil {
@@ -1563,7 +1565,13 @@ func (h *Handler) dispatchBookingConfirmation(b *booking.Booking, in bookingConf
 
 	mailCtx, cancelMail := context.WithTimeout(context.Background(), dispatchMailBudget)
 	defer cancelMail()
-	primaryPrefs, confirmFailed := h.notifyHosts(mailCtx, b, bData, hosts, livekitHostURL, shared && providerInvites)
+	// Re-read: the calendar phase stored each seat's event and which seats it invited,
+	// which the provider event's invite (Google, see providerEventInvite) is found by.
+	if fresh, err := h.assignedHosts(mailCtx, b.ID); err == nil && len(fresh) > 0 {
+		hosts = fresh
+	}
+	inv := h.providerEventInvite(mailCtx, b, hosts)
+	primaryPrefs, confirmFailed := h.notifyHosts(mailCtx, b, bData, hosts, livekitHostURL, shared && providerInvites, inv)
 
 	// Attendee confirmation, once. "With:" names the primary host; gated on the
 	// primary host's notification preference (matches prior behaviour).
@@ -1575,6 +1583,7 @@ func (h *Handler) dispatchBookingConfirmation(b *booking.Booking, in bookingConf
 		bData.AttachICS = !providerInvites
 	}
 	bData.ICSSequence = int(b.UpdatedAt.Unix())
+	inv.apply(&bData)
 	if primaryPrefs.NotifyConfirmation {
 		if err := sendWithRetry(mailCtx, h.logger, b.ID, "attendee", func() error {
 			return mailer.SendConfirmationToAttendee(mailCtx, h.mailer, bData)
@@ -1982,6 +1991,7 @@ func (h *Handler) cancelSideEffects(b booking.Booking) {
 	}
 	// Decided before the events are cancelled below, which clears their ids.
 	providerInvites := h.providerInvited(ctx, b.InviteDelivery, hosts)
+	inv := h.providerEventInvite(ctx, &b, hosts)
 	_, d.Guests = guestInvitees(h.loadGuests(ctx, b.ID))
 	for _, host := range hosts {
 		if gc != nil && host.ExternalEventID != "" {
@@ -2015,6 +2025,7 @@ func (h *Handler) cancelSideEffects(b booking.Booking) {
 			if host.InvitedViaOrganizer && providerInvites {
 				hd.AttachICS = false // the shared event's cancellation reaches them from the provider
 			}
+			h.applyHostProviderInvite(ctx, &hd, host, inv)
 			if err := mailer.SendCancellationToHost(ctx, h.mailer, hd); err != nil {
 				h.logger.Error("booking cancellation email (host)", "error", err, "booking_id", b.ID, "host", host.UserID)
 			}
@@ -2030,6 +2041,7 @@ func (h *Handler) cancelSideEffects(b booking.Booking) {
 		d.AttachICS = !providerInvites
 	}
 	d.ICSSequence = int(b.UpdatedAt.Unix())
+	inv.apply(&d)
 	if primaryPrefs.NotifyCancellation {
 		if err := mailer.SendCancellationToAttendee(ctx, h.mailer, d); err != nil {
 			h.logger.Error("booking cancellation email (attendee)", "error", err, "booking_id", b.ID)

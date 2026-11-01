@@ -39,6 +39,8 @@ type calConferenceData struct {
 }
 
 type calEventReq struct {
+	ICalUID        string             `json:"iCalUID,omitempty"`
+	Sequence       int                `json:"sequence,omitempty"`
 	Summary        string             `json:"summary"`
 	Description    string             `json:"description,omitempty"`
 	Location       string             `json:"location,omitempty"`
@@ -77,9 +79,16 @@ func (r calEventResp) meetLink() string {
 	return ""
 }
 
+// quietUpdates is every write's sendUpdates: Google emails no attendee, ever. Its
+// invitation shows times in the organizer's calendar time zone, whatever the event's own
+// zone, so Calnode sends the invites instead (see InvitesGuests and EventInvite).
+const quietUpdates = "sendUpdates=none"
+
 // CreateEvent creates a Google Calendar event and returns its event ID and, when
 // p.AddMeet is set, the generated Google Meet URL. Returns ("", "", nil) if the
-// user has no is_destination connection.
+// user has no is_destination connection. The attendees are put on the event but not
+// emailed (quietUpdates). A p.ICalUID that Google refuses is dropped and the create
+// retried, so a reused identity can only cost the booker a second entry, never the event.
 func (c *Client) CreateEvent(ctx context.Context, userID string, p calendar.CreateEventParams) (string, string, string, error) {
 	hc, calID, err := c.writeClient(ctx, userID, p.UseAnyAccount)
 	if err != nil || hc == nil {
@@ -119,41 +128,112 @@ func (c *Client) CreateEvent(ctx context.Context, userID string, p calendar.Crea
 		}
 	}
 
-	body, err := json.Marshal(reqBody)
-	if err != nil {
-		return "", "", "", fmt.Errorf("gcal: create event marshal: %w", err)
+	if p.ICalUID != "" {
+		reqBody.ICalUID, reqBody.Sequence = p.ICalUID, p.Sequence
 	}
 
-	apiURL := c.apiBase + "/calendars/" + url.PathEscape(calID) + "/events?sendUpdates=all"
+	apiURL := c.apiBase + "/calendars/" + url.PathEscape(calID) + "/events?" + quietUpdates
 	if p.AddMeet {
 		apiURL += "&conferenceDataVersion=1" // required for conferenceData.createRequest to take effect
 	}
+	evResp, status, err := insertEvent(ctx, hc, apiURL, reqBody)
+	if err == nil && reqBody.ICalUID != "" && status >= 400 && status < 500 {
+		reqBody.ICalUID, reqBody.Sequence = "", 0
+		evResp, status, err = insertEvent(ctx, hc, apiURL, reqBody)
+	}
+	if err != nil {
+		return "", "", "", err
+	}
+	if status != http.StatusOK {
+		return "", "", "", fmt.Errorf("gcal: create event status %d", status)
+	}
+	return evResp.ID, evResp.meetLink(), calID, nil
+}
+
+// insertEvent POSTs one events.insert and decodes a 200 reply. Any other status is
+// returned rather than turned into an error, so the caller can decide to retry.
+func insertEvent(ctx context.Context, hc *http.Client, apiURL string, reqBody calEventReq) (calEventResp, int, error) {
+	var evResp calEventResp
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return evResp, 0, fmt.Errorf("gcal: create event marshal: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(body))
 	if err != nil {
-		return "", "", "", fmt.Errorf("gcal: create event request: %w", err)
+		return evResp, 0, fmt.Errorf("gcal: create event request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := hc.Do(req)
 	if err != nil {
-		return "", "", "", fmt.Errorf("gcal: create event call: %w", err)
+		return evResp, 0, fmt.Errorf("gcal: create event call: %w", err)
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != http.StatusOK {
-		return "", "", "", fmt.Errorf("gcal: create event status %d", resp.StatusCode)
+		return evResp, resp.StatusCode, nil
 	}
-
-	var evResp calEventResp
 	if err := json.NewDecoder(resp.Body).Decode(&evResp); err != nil {
-		return "", "", "", fmt.Errorf("gcal: create event decode: %w", err)
+		return evResp, 0, fmt.Errorf("gcal: create event decode: %w", err)
 	}
-	return evResp.ID, evResp.meetLink(), calID, nil
+	return evResp, http.StatusOK, nil
+}
+
+// EventInvite reads an event's iCalendar identity - UID, SEQUENCE and organizer - for the
+// .ics Calnode sends in Google's place (calendar.QuietInviter).
+func (c *Client) EventInvite(ctx context.Context, userID, calendarID, eventID string) (calendar.EventInvite, error) {
+	var inv calendar.EventInvite
+	if eventID == "" {
+		return inv, fmt.Errorf("gcal: event invite: no event id")
+	}
+	hc, calID, err := c.writeClient(ctx, userID, true)
+	if err != nil {
+		return inv, err
+	}
+	if hc == nil {
+		return inv, fmt.Errorf("gcal: event invite: no connected account")
+	}
+	if calendarID != "" {
+		calID = calendarID
+	}
+	apiURL := c.apiBase + "/calendars/" + url.PathEscape(calID) + "/events/" + url.PathEscape(eventID) +
+		"?fields=" + url.QueryEscape("iCalUID,sequence,organizer(email,displayName)")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return inv, fmt.Errorf("gcal: event invite request: %w", err)
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return inv, fmt.Errorf("gcal: event invite call: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return inv, fmt.Errorf("gcal: event invite status %d", resp.StatusCode)
+	}
+	var ev struct {
+		ICalUID   string `json:"iCalUID"`
+		Sequence  int    `json:"sequence"`
+		Organizer struct {
+			Email       string `json:"email"`
+			DisplayName string `json:"displayName"`
+		} `json:"organizer"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&ev); err != nil {
+		return inv, fmt.Errorf("gcal: event invite decode: %w", err)
+	}
+	if ev.ICalUID == "" {
+		return inv, fmt.Errorf("gcal: event invite: no iCalUID")
+	}
+	return calendar.EventInvite{
+		UID:            ev.ICalUID,
+		Sequence:       ev.Sequence,
+		OrganizerName:  ev.Organizer.DisplayName,
+		OrganizerEmail: ev.Organizer.Email,
+	}, nil
 }
 
 // UpdateEvent moves an existing event to a new start/end (used on reschedule).
-// Returns nil if eventID is empty or the user has no connection. sendUpdates=all
-// so the attendee is notified of the new time.
+// Returns nil if eventID is empty or the user has no connection. Nobody is emailed
+// (quietUpdates): Calnode sends the attendees the updated invite.
 func (c *Client) UpdateEvent(ctx context.Context, userID, calendarID, eventID string, start, end time.Time) error {
 	if eventID == "" {
 		return nil
@@ -184,7 +264,7 @@ func (c *Client) UpdateEvent(ctx context.Context, userID, calendarID, eventID st
 		return fmt.Errorf("gcal: update event marshal: %w", err)
 	}
 
-	apiURL := c.apiBase + "/calendars/" + url.PathEscape(calID) + "/events/" + url.PathEscape(eventID) + "?sendUpdates=all"
+	apiURL := c.apiBase + "/calendars/" + url.PathEscape(calID) + "/events/" + url.PathEscape(eventID) + "?" + quietUpdates
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, apiURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("gcal: update event request: %w", err)
@@ -203,8 +283,8 @@ func (c *Client) UpdateEvent(ctx context.Context, userID, calendarID, eventID st
 	return nil
 }
 
-// AddAttendees adds people to an existing event and has Google invite them
-// (sendUpdates=all). The event's current attendees are read first and sent back with the
+// AddAttendees adds people to an existing event without Google emailing them
+// (quietUpdates; Calnode invites them). The event's current attendees are read first and sent back with the
 // new ones, since a PATCH replaces the whole list; their RSVP state is kept as is.
 func (c *Client) AddAttendees(ctx context.Context, userID, calendarID, eventID string, add []calendar.Invitee) error {
 	if eventID == "" || len(add) == 0 {
@@ -271,7 +351,7 @@ func (c *Client) AddAttendees(ctx context.Context, userID, calendarID, eventID s
 	if err != nil {
 		return fmt.Errorf("gcal: add attendees marshal: %w", err)
 	}
-	req, err = http.NewRequestWithContext(ctx, http.MethodPatch, eventURL+"?sendUpdates=all", bytes.NewReader(body))
+	req, err = http.NewRequestWithContext(ctx, http.MethodPatch, eventURL+"?"+quietUpdates, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("gcal: add attendees request: %w", err)
 	}
@@ -287,8 +367,9 @@ func (c *Client) AddAttendees(ctx context.Context, userID, calendarID, eventID s
 	return nil
 }
 
-// CancelEvent deletes a Google Calendar event by its event ID.
-// Returns nil if eventID is empty or the user has no connection.
+// CancelEvent deletes a Google Calendar event by its event ID, emailing nobody
+// (quietUpdates; Calnode sends the cancellation). Returns nil if eventID is empty or
+// the user has no connection.
 func (c *Client) CancelEvent(ctx context.Context, userID, calendarID, eventID string) error {
 	if eventID == "" {
 		return nil
@@ -308,7 +389,7 @@ func (c *Client) CancelEvent(ctx context.Context, userID, calendarID, eventID st
 		calID = calendarID
 	}
 
-	apiURL := c.apiBase + "/calendars/" + url.PathEscape(calID) + "/events/" + url.PathEscape(eventID) + "?sendUpdates=all"
+	apiURL := c.apiBase + "/calendars/" + url.PathEscape(calID) + "/events/" + url.PathEscape(eventID) + "?" + quietUpdates
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, apiURL, nil)
 	if err != nil {
 		return fmt.Errorf("gcal: cancel event request: %w", err)

@@ -31,9 +31,13 @@ var _ calendar.Provider = (*Client)(nil)
 // Name identifies this provider in the calendar_connections table.
 func (c *Client) Name() string { return "google" }
 
-// InvitesGuests is true: Google emails guests its own invite (sendUpdates=all),
-// so Calnode must not also attach an .ics (it would duplicate).
-func (c *Client) InvitesGuests() bool { return true }
+// InvitesGuests is false (wisegrid fork): Google puts guests on the event but emails
+// none of them (sendUpdates=none). Its own invitation shows the time in the organizer's
+// calendar time zone, never the booker's, so Calnode sends the invite in Google's place,
+// carrying the event's identity (EventInvite) so the booker's entry IS the Google event.
+func (c *Client) InvitesGuests() bool { return false }
+
+var _ calendar.QuietInviter = (*Client)(nil)
 
 // Client manages Google Calendar OAuth tokens and API access.
 type Client struct {

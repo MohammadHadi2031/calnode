@@ -29,14 +29,21 @@ type CreateEventParams struct {
 	// listed here is on the provider's attendee list - for Google Meet that is what lets
 	// them in without knocking.
 	Guests []Invitee
-	// TimeZone is the IANA zone the event is written in ("" = UTC). Google renders its
-	// invitation email's times in it for recipients who have no Google calendar setting.
+	// TimeZone is the IANA zone the event is written in ("" = UTC): the zone the event
+	// shows in its details. Google's own invitation email ignored it (it used the
+	// organizer's calendar zone), which is why Google is now a QuietInviter.
 	TimeZone string
 	// UseAnyAccount lets the provider write to one of the user's connected accounts that
 	// is NOT their destination when they have no destination with this provider. Set by
 	// Service.CreateEventVia, for the meeting host whose Meet/Teams-capable account is not
 	// the one their bookings normally land in (e.g. destination Outlook, Meet requested).
 	UseAnyAccount bool
+	// ICalUID and Sequence, when ICalUID is set, give the new event the iCalendar identity
+	// of an event the booker already holds (a reassigned booking's old event), so their
+	// calendar updates that entry instead of gaining a second one. Google only (wisegrid
+	// fork); other providers ignore them.
+	ICalUID  string
+	Sequence int
 }
 
 // Invitee is one attendee on a provider event.
@@ -67,8 +74,10 @@ type CalendarSelection struct {
 // by userID and resolve that user's stored credentials internally; they return
 // zero values (not errors) when the user has no matching connection.
 type Provider interface {
-	Name() string        // "google" | "microsoft"
-	InvitesGuests() bool // provider emails guests itself → suppress our own .ics
+	Name() string // "google" | "microsoft"
+	// InvitesGuests: the provider emails guests itself → suppress our own .ics. False for
+	// a QuietInviter, which puts guests on the event but leaves the invite to Calnode.
+	InvitesGuests() bool
 
 	// OAuth
 	AuthURL(state string) string
@@ -110,6 +119,26 @@ type Provider interface {
 // then the destination for rows written before stamping.
 type EventRecognizer interface {
 	RecognizesEvent(eventID string) bool
+}
+
+// QuietInviter is implemented by a provider that puts guests on its events without
+// emailing them (Google, wisegrid fork: its own invitation shows times in the organizer's
+// calendar time zone, never the booker's). Calnode emails the invite itself, as an .ics
+// that carries the provider event's own identity (EventInvite) - so the booker's calendar
+// entry, their RSVP and any later change made in the host's calendar all stay tied to the
+// one provider event, and Meet still admits the guests as attendees.
+type QuietInviter interface {
+	EventInvite(ctx context.Context, userID, calendarID, eventID string) (EventInvite, error)
+}
+
+// EventInvite is a provider event's iCalendar identity: what an .ics Calnode sends for it
+// must carry so calendar clients treat it as that event.
+type EventInvite struct {
+	UID            string // iCalendar UID (Google's iCalUID)
+	Sequence       int    // the event's current SEQUENCE
+	OrganizerName  string
+	OrganizerEmail string // the calendar that holds the event; RSVPs go here
+	Provider       string // set by Service.EventInvite
 }
 
 // ErrEventUnreachable matches an UpdateEvent or CancelEvent error that was refused before
@@ -477,18 +506,53 @@ type AttendeeAdder interface {
 var ErrCannotAddAttendees = errors.New("calendar: provider cannot add attendees to an existing event")
 
 // AddAttendees adds add to an existing event, resolving the provider as UpdateEvent does.
-// It returns ErrCannotAddAttendees when that provider has no AttendeeAdder or does not
-// email guests itself, since then nobody would tell the new attendee.
-func (s *Service) AddAttendees(ctx context.Context, userID, calendarID, eventID, provider string, add []Invitee) error {
+// It returns ErrCannotAddAttendees when that provider has no AttendeeAdder or neither
+// emails guests itself nor is a QuietInviter, since then the attendee would sit on an
+// event nobody can tell them about. invited reports whether the provider emailed them;
+// false (a QuietInviter) leaves the invite to the caller.
+func (s *Service) AddAttendees(ctx context.Context, userID, calendarID, eventID, provider string, add []Invitee) (invited bool, err error) {
 	pr := s.providerForEvent(ctx, userID, eventID, provider)
 	if pr == nil {
-		return ErrCannotAddAttendees
+		return false, ErrCannotAddAttendees
 	}
 	a, ok := pr.(AttendeeAdder)
-	if !ok || !pr.InvitesGuests() {
-		return ErrCannotAddAttendees
+	_, quiet := pr.(QuietInviter)
+	if !ok || !(pr.InvitesGuests() || quiet) {
+		return false, ErrCannotAddAttendees
 	}
-	return a.AddAttendees(ctx, userID, calendarID, eventID, add)
+	if err := a.AddAttendees(ctx, userID, calendarID, eventID, add); err != nil {
+		return false, err
+	}
+	return pr.InvitesGuests(), nil
+}
+
+// EventInvite returns the iCalendar identity of an existing event whose provider is a
+// QuietInviter, resolving the provider as UpdateEvent does. nil (no error) when the
+// provider emails its own invites or cannot be resolved.
+func (s *Service) EventInvite(ctx context.Context, userID, calendarID, eventID, provider string) (*EventInvite, error) {
+	pr := s.providerForEvent(ctx, userID, eventID, provider)
+	q, ok := pr.(QuietInviter)
+	if pr == nil || !ok {
+		return nil, nil
+	}
+	inv, err := q.EventInvite(ctx, userID, calendarID, eventID)
+	if err != nil {
+		return nil, err
+	}
+	inv.Provider = pr.Name()
+	return &inv, nil
+}
+
+// ProviderPlacesGuests reports whether the named provider puts guests on the events it
+// writes, so they reach any attendee's calendar on that provider without an .ics: it emails
+// them itself, or it is a QuietInviter. False for an unknown name.
+func (s *Service) ProviderPlacesGuests(name string) bool {
+	p := s.providers[name]
+	if p == nil {
+		return false
+	}
+	_, quiet := p.(QuietInviter)
+	return p.InvitesGuests() || quiet
 }
 
 // CancelEvent deletes an event. calendarID and provider are the ones recorded at

@@ -156,6 +156,8 @@ func (h *Handler) ReassignBooking(w http.ResponseWriter, r *http.Request) {
 		// the new host, and persist the new event ID (clearing it if recreation
 		// produced nothing, e.g. the new host has no destination calendar).
 		inviteMode := bCopy.InviteDelivery
+		// The new event's invite, when its provider leaves that to Calnode (Google).
+		var newInv *providerInvite
 		if oldInvited {
 			// The seat had no event of its own: the meeting lives on another host's
 			// calendar, which still lists the old host. Leave it be (rewriting a shared
@@ -163,6 +165,16 @@ func (h *Handler) ReassignBooking(w http.ResponseWriter, r *http.Request) {
 			h.logger.Warn("reassign: moved seat was invited to a shared event; its attendee list is unchanged",
 				"booking_id", bCopy.ID, "old_host", oldHostID)
 		} else if gc := h.getCal(); gc != nil {
+			// A Google event the booker is on was never mailed by Google: their calendar
+			// entry carries its identity. The new event takes that identity over (newer
+			// SEQUENCE), so the invite sent below moves the entry instead of adding one.
+			var oldInv *calendar.EventInvite
+			if extEventID != "" && inviteMode != booking.InviteByCalnode {
+				var err error
+				if oldInv, err = gc.EventInvite(ctx, oldHostID, extCalendarID, extEventID, extProvider); err != nil {
+					h.logger.Error("reassign: read old event invite identity", "error", err, "booking_id", bCopy.ID)
+				}
+			}
 			if extEventID != "" {
 				// Reassignment cancels on the OLD host's calendar. Their stamped provider
 				// routes it ("" falls back to id recognition, then their destination).
@@ -171,7 +183,7 @@ func (h *Handler) ReassignBooking(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			loc := i18n.Get(orgLocale) // nil (→ English) if empty/unrecognized; i18n.Locale.T handles nil safely
-			newEventID, _, newCalID, newProvider, err := gc.CreateEvent(ctx, newHostID, calendar.CreateEventParams{
+			params := calendar.CreateEventParams{
 				Summary:        loc.Tf("calendar_event_summary", etName, orgName),
 				Description:    loc.Tf("calendar_event_booking_id", bCopy.ID),
 				Location:       bCopy.LocationValue, // keep the existing Meet link (don't mint a new one)
@@ -179,7 +191,18 @@ func (h *Handler) ReassignBooking(w http.ResponseWriter, r *http.Request) {
 				End:            bCopy.EndAt,
 				OrganizerName:  orgName,
 				OrganizerEmail: calendarInvitee(inviteMode, orgEmail),
-			})
+			}
+			if oldInv != nil {
+				params.ICalUID, params.Sequence = oldInv.UID, oldInv.Sequence+1
+			}
+			newEventID, _, newCalID, newProvider, err := gc.CreateEvent(ctx, newHostID, params)
+			if err == nil && newEventID != "" && inviteMode != booking.InviteByCalnode {
+				if inv, ierr := gc.EventInvite(ctx, newHostID, newCalID, newEventID, newProvider); ierr != nil {
+					h.logger.Error("reassign: read new event invite identity", "error", ierr, "booking_id", bCopy.ID)
+				} else if inv != nil {
+					newInv = &providerInvite{EventInvite: *inv, seat: newHostID}
+				}
+			}
 			if err != nil {
 				h.logger.Error("reassign: create new calendar event", "error", err, "booking_id", bCopy.ID)
 			} else {
@@ -215,6 +238,10 @@ func (h *Handler) ReassignBooking(w http.ResponseWriter, r *http.Request) {
 		if inviteMode == booking.InviteByCalnode {
 			h.applyInviteDelivery(ctx, &d, inviteMode, newHostID)
 			d.ICSSequence = int(time.Now().Unix())
+		} else if newInv != nil {
+			// ...unless that calendar is Google, which emails nobody: send its invite.
+			d.AttachICS = true
+			newInv.apply(&d)
 		}
 		prefs := h.hostPrefsOrDefault(ctx, bCopy.ID, newHostID)
 		if prefs.NotifyConfirmation {
@@ -224,7 +251,7 @@ func (h *Handler) ReassignBooking(w http.ResponseWriter, r *http.Request) {
 		}
 		if prefs.NotifyHostBooking {
 			hd := d
-			h.applyHostInvite(ctx, &hd, inviteMode, newHostID)
+			h.applyHostInvite(ctx, &hd, inviteMode, newHostID) // clears newInv's identity: the event is theirs
 			if oldInvited {
 				hd.AttachICS = true // no calendar event was written for them
 			}
