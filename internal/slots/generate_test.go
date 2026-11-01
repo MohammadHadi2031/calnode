@@ -927,3 +927,43 @@ func TestGenerate_halfHourOffsetHostGetsWholeHourSlots(t *testing.T) {
 		t.Fatalf("starts = %v, want %v", starts, want)
 	}
 }
+
+// A collective with a Tehran (+03:30) and a London (+01:00 in June) host cannot give
+// both of them round hours. The grid follows AlignTZ, whatever order the hosts are in;
+// it used to follow the first host, so reordering host priority moved every slot.
+func TestGenerate_collectiveGridFollowsAlignTZNotHostOrder(t *testing.T) {
+	tehran, err1 := time.LoadLocation("Asia/Tehran")
+	london, err2 := time.LoadLocation("Europe/London")
+	if err1 != nil || err2 != nil {
+		t.Skip("tzdata missing")
+	}
+	day := time.Date(2026, 6, 15, 0, 0, 0, 0, time.UTC) // a Monday
+	// Both free 07:00-11:00 UTC: Tehran 10:30-14:30, London 08:00-12:00.
+	th := slots.HostAvailability{HostID: "th", Location: tehran, Role: "required",
+		Rules: []slots.AvailabilityRule{{DayOfWeek: time.Monday, StartTime: "10:30", EndTime: "14:30"}}}
+	ln := slots.HostAvailability{HostID: "ln", Location: london, Role: "required",
+		Rules: []slots.AvailabilityRule{{DayOfWeek: time.Monday, StartTime: "08:00", EndTime: "12:00"}}}
+	run := func(hosts []slots.HostAvailability, align *time.Location) []string {
+		got, err := slots.Generate(slots.Request{
+			Event:    slots.EventConfig{DurationMinutes: 60, SlotIntervalMinutes: 60, RoutingMode: "collective"},
+			Hosts:    hosts,
+			DateFrom: day, DateTo: day, BookerTZ: time.UTC, Now: day.Add(-48 * time.Hour),
+			AlignTZ: align,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, s := range got {
+			out = append(out, s.Start.In(london).Format("15:04"))
+		}
+		return out
+	}
+	want := "08:00,09:00,10:00,11:00" // on the hour in London, the stated clock
+	if got := strings.Join(run([]slots.HostAvailability{th, ln}, london), ","); got != want {
+		t.Errorf("Tehran first, AlignTZ London: %s, want %s", got, want)
+	}
+	if got := strings.Join(run([]slots.HostAvailability{ln, th}, london), ","); got != want {
+		t.Errorf("London first, AlignTZ London: %s, want %s", got, want)
+	}
+}

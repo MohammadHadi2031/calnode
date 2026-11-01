@@ -51,6 +51,12 @@ type Request struct {
 	DateTo   time.Time      // inclusive; only the UTC date portion is used
 	BookerTZ *time.Location // output timezone for slot Start/End; must not be nil
 	Now      time.Time      // injectable clock; use time.Now().UTC() in production
+	// AlignTZ, when set and the pool has more than one host, is the clock slot starts
+	// are aligned to. Hosts in zones a half hour apart (Tehran, Istanbul) cannot all get
+	// round times, so the grid must follow one clock; without AlignTZ it follows the
+	// first host in priority order, which meant reordering hosts silently moved every
+	// slot. Callers pass the event type owner's zone. A lone host always uses their own.
+	AlignTZ *time.Location
 }
 
 // Generate runs the slot-generation algorithm (§9) and returns bookable slots
@@ -160,9 +166,13 @@ func newParams(req Request) params {
 		dateTo:   req.DateTo.UTC().Truncate(24 * time.Hour),
 		alignLoc: time.UTC,
 	}
-	if len(req.Hosts) > 0 && req.Hosts[0].Location != nil {
-		// The first pool host is the primary (priority order), so the grid follows the
-		// team's lead host. A UTC host keeps the old epoch grid exactly.
+	switch {
+	case len(req.Hosts) > 1 && req.AlignTZ != nil:
+		// Several hosts: one stated clock, independent of host order (see AlignTZ).
+		p.alignLoc = req.AlignTZ
+	case len(req.Hosts) > 0 && req.Hosts[0].Location != nil:
+		// A lone host's own clock; or, with no AlignTZ, the first pool host's (priority
+		// order). A UTC host keeps the old epoch grid exactly.
 		p.alignLoc = req.Hosts[0].Location
 	}
 	if req.Event.MaxFutureDays > 0 {

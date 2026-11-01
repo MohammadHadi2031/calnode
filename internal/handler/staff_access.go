@@ -28,6 +28,20 @@ func (h *Handler) canManageHost(ctx context.Context, actor AuthUser, hostID stri
 	return n > 0, err
 }
 
+// managesBookingHostAsSecretary reports whether actor is the secretary of booking id's
+// primary host (and not that host). False on any error: callers fall back to the
+// host-only rule.
+func (h *Handler) managesBookingHostAsSecretary(ctx context.Context, actor AuthUser, bookingID string) bool {
+	var n int
+	if err := h.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM bookings b
+		JOIN secretary_hosts sh ON sh.host_id = b.host_id AND sh.secretary_id = ?
+		WHERE b.id = ? AND b.host_id != ?`, actor.ID, bookingID, actor.ID).Scan(&n); err != nil {
+		return false
+	}
+	return n > 0
+}
+
 // secretaryHostIDs returns the hosts assigned to secretaryID, oldest assignment first.
 func (h *Handler) secretaryHostIDs(ctx context.Context, secretaryID string) ([]string, error) {
 	rows, err := h.db.QueryContext(ctx,

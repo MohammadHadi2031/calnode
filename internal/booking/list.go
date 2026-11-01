@@ -20,6 +20,10 @@ type ListFilter struct {
 	// meetings they are on, not only the ones they lead. Empty lists the whole
 	// workspace; callers MUST gate that on the admin role.
 	ViewerID string
+	// ManagedBy, instead of ViewerID, lists the bookings whose primary host this user is
+	// the secretary of (wisegrid fork: secretary_hosts). It never includes the user's
+	// own bookings; those are ViewerID's.
+	ManagedBy string
 
 	EventTypeID string // event_types.id, not the slug
 	HostID      string // a specific host, resolved the same way ViewerID is
@@ -105,6 +109,10 @@ func (f ListFilter) where(includeWhen bool) (string, []any) {
 	if f.ViewerID != "" {
 		conds = append(conds, hostsBooking)
 		args = append(args, f.ViewerID, f.ViewerID)
+	}
+	if f.ManagedBy != "" {
+		conds = append(conds, "bookings.host_id IN (SELECT host_id FROM secretary_hosts WHERE secretary_id = ?)")
+		args = append(args, f.ManagedBy)
 	}
 	if f.HostID != "" {
 		conds = append(conds, hostsBooking)

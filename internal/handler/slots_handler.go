@@ -155,6 +155,20 @@ type slotsWanted struct {
 	NoticeGap bool
 }
 
+// userLocation is a user's profile zone, or nil when the user is missing or the zone
+// does not load (callers then fall back to their own default).
+func (h *Handler) userLocation(ctx context.Context, userID string) *time.Location {
+	var tz string
+	if err := h.db.QueryRowContext(ctx, `SELECT iana_timezone FROM users WHERE id = ?`, userID).Scan(&tz); err != nil || tz == "" {
+		return nil
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return nil
+	}
+	return loc
+}
+
 // computeSlots returns the bookable slots (and the candidate hosts' display map) for
 // an active+public event type over the given optional date range, in tzName. It's
 // the shared core behind the REST GetSlots handler and the MCP get_available_slots
@@ -260,6 +274,9 @@ func (h *Handler) computeSlots(ctx context.Context, slug, tzName, fromStr, toStr
 		DateTo:   dateTo,
 		BookerTZ: bookerTZ,
 		Now:      now,
+		// Several hosts share one slot grid; it follows the event type owner's clock
+		// rather than whichever host is first in priority order (see AlignTZ).
+		AlignTZ: h.userLocation(ctx, et.UserID),
 	}
 
 	// Taken slots are produced only when the caller asked for them AND this event type

@@ -52,6 +52,43 @@ func normalizeGuests(raw []string, organizerEmail string, max int, loc *i18n.Loc
 	return out, nil
 }
 
+// dropHostGuests removes guests whose address belongs to a host of the event type (any
+// role, or its owner). A host is on the meeting anyway; listed as a guest too they got a
+// host notice and a guest confirmation for the same booking, and duplicate reminders.
+// The booker can't know which host a round-robin will pick, so every possible host is
+// dropped rather than refused, the same as the booker's own address.
+func (h *Handler) dropHostGuests(ctx context.Context, eventTypeID string, guests []booking.Attendee) ([]booking.Attendee, error) {
+	if len(guests) == 0 {
+		return guests, nil
+	}
+	rows, err := h.db.QueryContext(ctx, `
+		SELECT lower(u.email) FROM users u
+		WHERE u.id IN (SELECT user_id FROM event_type_hosts WHERE event_type_id = ?)
+		   OR u.id = (SELECT user_id FROM event_types WHERE id = ?)`, eventTypeID, eventTypeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	hostEmails := map[string]bool{}
+	for rows.Next() {
+		var e string
+		if err := rows.Scan(&e); err != nil {
+			return nil, err
+		}
+		hostEmails[e] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := guests[:0:0]
+	for _, g := range guests {
+		if !hostEmails[strings.ToLower(g.Email)] {
+			out = append(out, g)
+		}
+	}
+	return out, nil
+}
+
 // tooManyGuests is the cap message, singular for a cap of one ("1 guests" otherwise).
 func tooManyGuests(loc *i18n.Locale, max int) string {
 	if max == 1 {
