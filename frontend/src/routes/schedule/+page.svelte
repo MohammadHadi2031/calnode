@@ -442,15 +442,22 @@
 	 */
 	function conflictDetail(c: Conflict): string {
 		const label = conflictLabel(c).toLowerCase();
-		let d = c.detail && c.detail.toLowerCase() !== label ? c.detail : '';
+		let d = c.detail ?? '';
+		// Drop the label when the detail starts by repeating it ("outside working hours —
+		// outside working hours (…)"), keeping whatever it adds.
+		if (d.toLowerCase().startsWith(label)) d = d.slice(label.length).trim();
 		if (c.at) {
 			const t = DateTime.fromISO(c.at).setZone(viewTz);
 			if (t.isValid) d = `${d || 'at'}${d ? ' at' : ''} ${t.toFormat(`ccc ${DATE_PATTERN}, ${TIME_PATTERN}`)}`;
 		}
 		return d;
 	}
+	/** Can't be saved even with force: past, same start, or a host the caller doesn't manage. */
+	function isBlockingConflict(c: Conflict): boolean {
+		return BLOCKING_KINDS.has(c.kind) || !!c.blocking;
+	}
 	function isBlocking(list: Conflict[] | null): boolean {
-		return !!list && list.some((c) => BLOCKING_KINDS.has(c.kind));
+		return !!list && list.some(isBlockingConflict);
 	}
 
 	// ---------------------------------------------------------------------------------
@@ -499,6 +506,8 @@
 		if (cMode === 'appointment') parties.push({ who: 'Attendees', zone: cTz });
 		parties.push({ who: viewerWho, zone: viewTz });
 		if (cHost) parties.push({ who: cHost.self ? 'You' : cHost.name, zone: cHost.timezone });
+		// Co-hosts are booked too, so their local time belongs here as well.
+		if (cMode === 'appointment') for (const co of cEventType?.co_hosts ?? []) parties.push({ who: co.name, zone: co.timezone });
 		return zoneRows(s, e, parties);
 	});
 
@@ -549,8 +558,10 @@
 	function pickHost(id: string) {
 		cHostId = id;
 		const h = hosts.find((x) => x.id === id);
-		cEventTypeId = h?.event_types[0]?.id ?? '';
-		const et = h?.event_types[0];
+		// Default to an event type that books this host alone: defaulting to one shared with
+		// co-hosts silently booked them as well.
+		const et = h?.event_types.find((e) => (e.co_hosts ?? []).length === 0) ?? h?.event_types[0];
+		cEventTypeId = et?.id ?? '';
 		cConference = et && isOnlineMeeting(et.location_type) ? et.location_type : '';
 		cSync = !!h?.has_calendar;
 		applyDefaultEnd();
@@ -690,6 +701,20 @@
 	let moveTitle = $state('');
 	let pendingMove: { info: MoveInfo; send: (force: boolean) => Promise<unknown> } | null = null;
 
+	/**
+	 * A dragged or resized appointment waiting for the user to confirm it. Moving one
+	 * emails the attendees and updates calendar invites, so a slip of the mouse must not
+	 * do that on its own. Blocks move straight away: nobody is told about them.
+	 */
+	let dragConfirm = $state<{
+		info: MoveInfo;
+		send: (force: boolean) => Promise<unknown>;
+		title: string;
+		from: string;
+		to: string;
+		who: string;
+	} | null>(null);
+
 	async function onEventChange(info: MoveInfo) {
 		const p = info.event.extendedProps as ItemProps;
 		if (p.kind === 'busy' || !info.event.start || !info.event.end) { info.revert(); return; }
@@ -701,6 +726,35 @@
 			p.kind === 'booking'
 				? api.patch(`/v1/staff/bookings/${p.booking.id}`, force ? { ...body, force: true } : body)
 				: api.patch(`/v1/unavailable-blocks/${p.block.id}`, force ? { ...body, force: true } : body);
+		if (p.kind === 'booking') {
+			const b = p.booking;
+			const guests = (b.guest_list ?? b.guests ?? []).length;
+			dragConfirm = {
+				info,
+				send,
+				title: b.event_type_name,
+				from: fmtRange(b.start_at, b.end_at),
+				to: fmtRange(fromFc(info.event.startStr), fromFc(info.event.endStr)),
+				who: (b.attendee_name || b.attendee_email || 'The attendee') + (guests > 0 ? ` and ${guests} guest${guests === 1 ? '' : 's'}` : '')
+			};
+			return;
+		}
+		await sendMove(info, send, 'block');
+	}
+
+	function cancelDrag() {
+		dragConfirm?.info.revert();
+		dragConfirm = null;
+	}
+
+	async function confirmDrag() {
+		const d = dragConfirm;
+		dragConfirm = null;
+		if (d) await sendMove(d.info, d.send, 'booking');
+	}
+
+	async function sendMove(info: MoveInfo, send: (force: boolean) => Promise<unknown>, kind: 'booking' | 'block') {
+		const p = { kind };
 		try {
 			await send(false);
 			toast.success(p.kind === 'booking' ? 'Appointment moved' : 'Block updated');
@@ -1140,10 +1194,17 @@
 							</Select.Trigger>
 							<Select.Content>
 								{#each cHost?.event_types ?? [] as et (et.id)}
-									<Select.Item value={et.id} label={et.name}>{et.name} · {et.duration_minutes} min</Select.Item>
+									<Select.Item value={et.id} label={et.name}>
+										{et.name} · {et.duration_minutes} min{#if (et.co_hosts ?? []).length > 0}<span class="text-muted-foreground">{' '}· with {et.co_hosts.map((c) => c.name).join(', ')}</span>{/if}
+									</Select.Item>
 								{/each}
 							</Select.Content>
 						</Select.Root>
+						{#if (cEventType?.co_hosts ?? []).length > 0}
+							<p class="text-xs text-muted-foreground">
+								Also books {cEventType!.co_hosts.map((c) => c.name).join(', ')}: this event type has more than one host.
+							</p>
+						{/if}
 					</div>
 				{/if}
 
@@ -1216,7 +1277,7 @@
 				<ul class="mt-1 list-disc space-y-0.5 pl-5">
 					{#each cConflicts as c}
 						<li>
-							<span class:font-semibold={BLOCKING_KINDS.has(c.kind)}>{c.host_name ? `${c.host_name}: ` : ''}{conflictLabel(c)}</span>
+							<span class:font-semibold={isBlockingConflict(c)}>{c.host_name ? `${c.host_name}: ` : ''}{conflictLabel(c)}</span>
 							{#if conflictDetail(c)}<span class="opacity-75"> — {conflictDetail(c)}</span>{/if}
 						</li>
 					{/each}
@@ -1240,6 +1301,27 @@
 	</Dialog.Content>
 </Dialog.Root>
 
+<!-- Confirm a dragged or resized appointment before anyone is emailed -->
+<Dialog.Root open={!!dragConfirm} onOpenChange={(o) => { if (!o && dragConfirm) cancelDrag(); }}>
+	<Dialog.Content class="max-w-md">
+		{#if dragConfirm}
+			<Dialog.Header>
+				<Dialog.Title>Move this appointment?</Dialog.Title>
+				<Dialog.Description>{dragConfirm.title}</Dialog.Description>
+			</Dialog.Header>
+			<dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-sm">
+				<dt class="text-muted-foreground">From</dt><dd>{dragConfirm.from}</dd>
+				<dt class="text-muted-foreground">To</dt><dd class="font-medium">{dragConfirm.to}</dd>
+			</dl>
+			<p class="text-sm text-muted-foreground">{dragConfirm.who} will be emailed the new time, and calendar invites are updated.</p>
+			<Dialog.Footer class="gap-2">
+				<Button variant="outline" onclick={cancelDrag}>Keep it</Button>
+				<Button onclick={confirmDrag}>Move</Button>
+			</Dialog.Footer>
+		{/if}
+	</Dialog.Content>
+</Dialog.Root>
+
 <!-- Move / resize conflict confirmation -->
 <Dialog.Root bind:open={moveOpen} onOpenChange={(o) => { if (!o && pendingMove) closeMove(true); }}>
 	<Dialog.Content class="max-w-md">
@@ -1250,7 +1332,7 @@
 		</Dialog.Header>
 		<ul class="list-disc space-y-0.5 pl-5 text-sm">
 			{#each moveConflicts as c}
-				<li class={BLOCKING_KINDS.has(c.kind) ? 'font-medium text-destructive' : ''}>
+				<li class={isBlockingConflict(c) ? 'font-medium text-destructive' : ''}>
 					{c.host_name ? `${c.host_name}: ` : ''}{conflictLabel(c)}{#if conflictDetail(c)}<span class="text-muted-foreground"> — {conflictDetail(c)}</span>{/if}
 				</li>
 			{/each}

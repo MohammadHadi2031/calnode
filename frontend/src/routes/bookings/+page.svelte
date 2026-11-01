@@ -18,7 +18,11 @@
 	// Members see only their own hosted bookings. Owners/admins can switch to a
 	// workspace-wide view (?scope=all) for oversight.
 	const isAdmin = $derived($currentUser?.is_admin ?? false);
-	let scope = $state<'mine' | 'all'>('mine');
+	let scope = $state<'mine' | 'all' | 'managed'>('mine');
+	// A secretary (not an admin) can switch to the bookings of the hosts they manage.
+	const isSecretary = $derived(!isAdmin && ($currentUser?.secretary_for?.length ?? 0) > 0);
+	/** Bookings of other people are listed: name the host on each row. */
+	const showHost = $derived(scope !== 'mine');
 
 	// Filtering, sorting and paging all happen in SQL now. They used to happen here,
 	// over a response that contained every booking the user could see - which meant
@@ -169,6 +173,7 @@
 	function query(): string {
 		const p = new URLSearchParams();
 		if (scope === 'all' && isAdmin) p.set('scope', 'all');
+		if (scope === 'managed') p.set('scope', 'managed');
 		p.set('when', timeFilter);
 		// Past reads most-recent-first, upcoming soonest-first. Server-side now: sorting
 		// a page in the browser would only ever sort that page.
@@ -226,7 +231,7 @@
 		await load();
 	}
 
-	async function setScope(s: 'mine' | 'all') {
+	async function setScope(s: 'mine' | 'all' | 'managed') {
 		if (scope === s) return;
 		scope = s;
 		// Host and team only mean anything across the workspace.
@@ -396,7 +401,7 @@
 	<div class="min-w-0">
 		<h1 class="text-2xl font-semibold tracking-tight">Bookings</h1>
 		<p class="mt-1 text-sm text-muted-foreground">
-			{scope === 'all' ? 'All meetings across the workspace.' : 'Meetings you are hosting.'}
+			{scope === 'all' ? 'All meetings across the workspace.' : scope === 'managed' ? 'Meetings of the hosts you manage as their secretary.' : 'Meetings you are hosting.'}
 			Times are in <span class="font-medium text-foreground">{fmtZone($prefs)}</span>.
 		</p>
 	</div>
@@ -415,6 +420,17 @@
 					class="rounded px-3 py-1 text-sm font-medium transition-colors {scope === 'all' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'}"
 					onclick={() => setScope('all')}
 				>All bookings</button>
+			</div>
+		{:else if isSecretary}
+			<div class="inline-flex rounded-md border p-0.5">
+				<button
+					class="rounded px-3 py-1 text-sm font-medium transition-colors {scope === 'mine' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'}"
+					onclick={() => setScope('mine')}
+				>My bookings</button>
+				<button
+					class="rounded px-3 py-1 text-sm font-medium transition-colors {scope === 'managed' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'}"
+					onclick={() => setScope('managed')}
+				>Hosts I manage</button>
 			</div>
 		{/if}
 	</div>
@@ -515,7 +531,7 @@
 		<table class="w-full min-w-[640px] table-fixed text-sm">
 			<colgroup>
 				<col />
-				{#if scope === 'all'}<col class="w-[17%]" />{/if}
+				{#if showHost}<col class="w-[17%]" />{/if}
 				<col class="w-[16%]" />
 				<col class="w-44" />
 				<col class="w-32" />
@@ -524,7 +540,7 @@
 			<thead>
 				<tr class="border-b">
 					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Attendee</th>
-					{#if scope === 'all'}<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Host</th>{/if}
+					{#if showHost}<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Host</th>{/if}
 					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Event</th>
 					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground" title="In {fmtZone($prefs)}">Start time</th>
 					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Status</th>
@@ -542,7 +558,7 @@
 								<span class="text-muted-foreground">—</span>
 							{/if}
 						</td>
-						{#if scope === 'all'}<td class="truncate px-4 py-3 text-muted-foreground" title={b.host_name}>{b.host_name || '—'}</td>{/if}
+						{#if showHost}<td class="truncate px-4 py-3 text-muted-foreground" title={b.host_name}>{b.host_name || '—'}</td>{/if}
 						<td class="truncate px-4 py-3 font-mono text-xs text-muted-foreground" title={b.event_type_slug}>{b.event_type_slug ?? '—'}</td>
 						<td class="px-4 py-3 text-muted-foreground">
 							<span class="whitespace-nowrap">{fmt(b.start_at)}</span>
@@ -629,7 +645,7 @@
 
 					{#if expandedId === b.id}
 						<tr>
-							<td colspan={scope === 'all' ? 6 : 5} class="p-0">
+							<td colspan={showHost ? 6 : 5} class="p-0">
 								<div class="border-t bg-muted/20 px-4 py-3">
 									<p class="mb-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Details</p>
 									<dl class="mb-3 space-y-1.5 text-sm">
@@ -785,7 +801,7 @@
 
 					{#if reschedulingId === b.id}
 						<tr>
-							<td colspan={scope === 'all' ? 6 : 5} class="p-0">
+							<td colspan={showHost ? 6 : 5} class="p-0">
 								<div class="border-t bg-muted/30 px-4 py-4">
 									<p class="mb-3 text-sm font-medium">Reschedule — {b.attendees?.[0]?.name ?? 'attendee'}</p>
 
