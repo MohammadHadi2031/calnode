@@ -1,6 +1,6 @@
 # Disable and re-enable a webhook (wisegrid fork)
 
-A webhook can be switched off and on again from Settings → Webhooks, without deleting it
+A webhook can be switched off and on again from Webhooks (sidebar → Developer), without deleting it
 and losing its URL, signing secret, events and field selection. No migration: it uses the
 existing `webhooks.is_active` column, which had no way to be changed until now.
 
