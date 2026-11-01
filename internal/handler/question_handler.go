@@ -376,7 +376,13 @@ func (h *Handler) GetBookingAnswers(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	if hostID != user.ID {
+	// The host, an admin or the host's secretary: whoever the Bookings page shows the
+	// booking to (it was the host alone, so expanding someone else's booking 404'd).
+	if ok, err := h.canManageHost(r.Context(), user, hostID); err != nil {
+		h.logger.ErrorContext(r.Context(), "get booking answers: access", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	} else if !ok {
 		h.writeError(w, http.StatusNotFound, "booking not found")
 		return
 	}

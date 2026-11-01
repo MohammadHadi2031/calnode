@@ -83,3 +83,26 @@ Confirmations, invites, Meet/Teams links and reminders work the same as for a pu
 ## Attendees
 
 The dialog has one **Attendees** list with **Add attendee**. The first person is the main contact: they are the booking's organizer and get the confirmation with the reschedule and cancel link. Everyone after them is sent as a guest with their name. The popup lists everyone the same way and offers **Add attendee** on upcoming confirmed appointments the viewer manages. That button calls `POST /v1/bookings/{id}/guests` (docs/fork-host-guests.md), which a secretary of the booking's primary host may now use as well.
+
+## Rules added after review (0.11.2-wisegrid.9)
+
+- **Force only covers hosts you manage.** On an event type with several required hosts,
+  booking or moving with `force` still refuses a conflict that belongs to a co-host the
+  caller does not manage (a secretary for host A cannot push host B outside their hours).
+  Such a conflict carries `"blocking": true` in the 409 and the client offers no
+  "save anyway". Admins manage everyone, so nothing changes for them.
+- **An appointment that has already ended can't be moved** (409).
+- **Hosts aren't guests.** A guest address that belongs to a host of the event type is
+  dropped, on the public booking page and here: the host is on the meeting anyway.
+- `GET /v1/staff/hosts` event types carry `routing_mode` and `co_hosts` (the other
+  required hosts). The new-appointment dialog defaults to an event type without
+  co-hosts, names the co-hosts of the one picked, and shows their local time.
+- Dragging or resizing an **appointment** asks first ("Move this appointment?"), because
+  the move emails everyone. Blocks still move straight away.
+- **Bookings page for secretaries:** "Hosts I manage" (`GET /v1/bookings?scope=managed`)
+  lists the bookings of the hosts they are secretary for. The host, an admin or the
+  host's secretary may open, reschedule and cancel a booking there; reschedule keeps
+  the booking's own length instead of resetting it to the event type's duration.
+- **Slot grid for several hosts:** slot starts follow the event type owner's clock
+  (`slots.Request.AlignTZ`), not the first host in priority order, so reordering hosts
+  no longer moves every slot. A lone host keeps their own clock.

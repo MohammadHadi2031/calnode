@@ -354,6 +354,9 @@ export type StaffEventType = {
 	duration_minutes: number;
 	location_type: string;
 	allow_conference_choice: boolean;
+	routing_mode: string;
+	/** The other required hosts: booking this event type for the host books them too. */
+	co_hosts: { id: string; name: string; timezone: string }[];
 };
 
 /** A host the caller can manage (self, a secretary assignment, or every host for admins). */
@@ -431,6 +434,8 @@ export type Conflict = {
 	detail?: string;
 	/** Start of the conflicting appointment (RFC3339 UTC), for the client to show in its zone. */
 	at?: string;
+	/** Force won't override it: the caller doesn't manage that host (a co-host). */
+	blocking?: boolean;
 };
 
 /** Body of a 409 from the staff booking / unavailable-block endpoints. */

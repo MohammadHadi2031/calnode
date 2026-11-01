@@ -225,6 +225,14 @@ func TestListBookings_whenSplitsOnEndTime(t *testing.T) {
 	if r.Counts.Upcoming != 1 || r.Counts.Past != 1 {
 		t.Errorf("counts = %+v, want 1 upcoming and 1 past regardless of the active tab", r.Counts)
 	}
+	// But total is what the tab pages through: "1–1 of 2" with a Next leading nowhere
+	// was the bug.
+	if r.Total != 1 {
+		t.Errorf("when=upcoming total = %d, want 1 (the tab's own count)", r.Total)
+	}
+	if all := listBookings(t, h, key, ""); all.Total != 2 {
+		t.Errorf("no when: total = %d, want 2", all.Total)
+	}
 }
 
 // Ordering has to move server-side with pagination: sorting a page in the browser
