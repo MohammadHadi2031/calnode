@@ -180,6 +180,44 @@ func TestDelete_unknownIDReturnsNotFound(t *testing.T) {
 	}
 }
 
+// A paused webhook gets nothing queued; resumed, it gets new events again, but
+// nothing from the paused period. Another user cannot pause it.
+func TestUpdate_pauseAndResume(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	wh, _, _ := e.svc.Create(ctx, testUserID, "https://example.com/hook", []string{"booking.created"})
+	p := webhook.BookingPayload{HostID: testUserID, Status: "confirmed"}
+	off, on := false, true
+	count := func() int {
+		var n int
+		e.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM webhook_deliveries WHERE webhook_id = ?`, wh.ID).Scan(&n)
+		return n
+	}
+
+	if err := e.svc.Update(ctx, "someone-else", wh.ID, nil, nil, &off); err != webhook.ErrNotFound {
+		t.Fatalf("pause by another user: %v; want ErrNotFound", err)
+	}
+	if err := e.svc.Update(ctx, testUserID, wh.ID, nil, nil, &off); err != nil {
+		t.Fatalf("pause: %v", err)
+	}
+	list, _ := e.svc.List(ctx, testUserID)
+	if len(list) != 1 || list[0].IsActive {
+		t.Fatalf("after pause List = %+v; want one inactive webhook", list)
+	}
+	e.svc.Enqueue(ctx, "booking.created", p)
+	if n := count(); n != 0 {
+		t.Errorf("deliveries while paused = %d; want 0", n)
+	}
+
+	if err := e.svc.Update(ctx, testUserID, wh.ID, nil, nil, &on); err != nil {
+		t.Fatalf("resume: %v", err)
+	}
+	e.svc.Enqueue(ctx, "booking.created", p)
+	if n := count(); n != 1 {
+		t.Errorf("deliveries after resume = %d; want 1 (the new event only)", n)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Enqueue
 // ---------------------------------------------------------------------------

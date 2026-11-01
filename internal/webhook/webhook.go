@@ -210,9 +210,21 @@ func (s *Service) Create(ctx context.Context, userID, url string, events []strin
 
 // Update applies partial changes to a webhook owned by userID. Nil pointers are
 // left unchanged. Returns ErrNotFound if no such webhook exists for the user.
-func (s *Service) Update(ctx context.Context, userID, id string, events, fields *[]string) error {
+//
+// isActive pauses or resumes the webhook. While paused nothing is queued for it
+// (Enqueue skips it) and deliveries already queued are not sent (the worker checks
+// on delivery). Events from the paused period are not replayed on resume.
+func (s *Service) Update(ctx context.Context, userID, id string, events, fields *[]string, isActive *bool) error {
 	var set []string
 	var args []any
+	if isActive != nil {
+		set = append(set, "is_active = ?")
+		if *isActive {
+			args = append(args, 1)
+		} else {
+			args = append(args, 0)
+		}
+	}
 	if events != nil {
 		eb, _ := json.Marshal(*events)
 		set = append(set, "events = ?")
