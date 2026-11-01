@@ -15,7 +15,9 @@ import (
 // Attached when the host has no Google destination calendar (otherwise Google already
 // invites the attendee and a second invite would duplicate it), and always when the
 // booking's invites are sent by Calnode — then d.HideHostInInvite swaps the host out of
-// ORGANIZER for the instance's sender identity.
+// ORGANIZER for the instance's sender identity. With d.ICSUID set it is instead the
+// invite of a provider event that emails nobody itself (Google): that event's UID and
+// organizer replace the booking's own.
 func BuildICS(d BookingData, method string) []byte {
 	status := "CONFIRMED"
 	if method == "CANCEL" {
@@ -31,7 +33,11 @@ func BuildICS(d BookingData, method string) []byte {
 	writeICSLine(&b, "CALSCALE:GREGORIAN")
 	writeICSLine(&b, "METHOD:"+method)
 	writeICSLine(&b, "BEGIN:VEVENT")
-	writeICSLine(&b, "UID:"+d.BookingID+"@calnode")
+	uid := d.BookingID + "@calnode"
+	if d.ICSUID != "" {
+		uid = d.ICSUID
+	}
+	writeICSLine(&b, "UID:"+uid)
 	writeICSLine(&b, fmt.Sprintf("SEQUENCE:%d", d.ICSSequence))
 	writeICSLine(&b, "DTSTAMP:"+stamp)
 	writeICSLine(&b, "DTSTART:"+d.StartAt.UTC().Format(icsTimeLayout))
@@ -49,6 +55,9 @@ func BuildICS(d BookingData, method string) []byte {
 	if d.HideHostInInvite {
 		orgName, orgEmail = d.InviteOrganizerName, d.InviteOrganizerEmail
 	}
+	if d.ICSUID != "" && d.ICSOrganizerEmail != "" {
+		orgName, orgEmail = d.ICSOrganizerName, d.ICSOrganizerEmail
+	}
 	if orgEmail != "" {
 		writeICSLine(&b, "ORGANIZER;CN="+escapeICSParam(orgName)+":mailto:"+orgEmail)
 	}
@@ -63,6 +72,9 @@ func BuildICS(d BookingData, method string) []byte {
 				name = g.Email
 			}
 			writeICSLine(&b, "ATTENDEE;CN="+escapeICSParam(name)+";RSVP=TRUE:mailto:"+g.Email)
+		}
+		if d.ICSHostAttendee && d.HostEmail != "" && !strings.EqualFold(d.HostEmail, orgEmail) {
+			writeICSLine(&b, "ATTENDEE;CN="+escapeICSParam(d.HostName)+";RSVP=TRUE:mailto:"+d.HostEmail)
 		}
 	}
 	writeICSLine(&b, "STATUS:"+status)

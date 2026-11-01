@@ -61,6 +61,16 @@ type BookingData struct {
 	// hold the booker as a guest, or editing the entry there could re-invite them from the
 	// host's personal account - the very thing Calnode-sent invites avoid.
 	ICSWithoutAttendee bool
+	// ICSUID, when set, is the provider event's own iCalendar UID (wisegrid fork): Google
+	// puts the booker on its event without emailing them, and this .ics is that event's
+	// invite. It is organized by ICSOrganizerName/ICSOrganizerEmail - the calendar holding
+	// the event, where RSVPs belong - and ICSSequence is the event's SEQUENCE.
+	// ICSHostAttendee lists the host (HostName/HostEmail) among the attendees too: a
+	// co-host's own copy of the shared event.
+	ICSUID            string
+	ICSOrganizerName  string
+	ICSOrganizerEmail string
+	ICSHostAttendee   bool
 	// Branding — instance-wide, threaded in by the handler. BrandName is the
 	// wordmark/footer name (falls back to "Calnode" when empty); LogoURL is an
 	// optional absolute https image shown in the HTML email header.

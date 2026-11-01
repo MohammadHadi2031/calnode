@@ -173,20 +173,22 @@ func (h *Handler) AddBookingGuest(w http.ResponseWriter, r *http.Request) {
 }
 
 // inviteNewGuest invites a guest just added to b. A calendar-invited booking adds them to
-// each event that holds the meeting (the shared organizer event, or every host's own), and
-// the provider sends the invite - the same way the booking's other guests were invited, so
-// Google Meet admits them without knocking. When there is no such event, or any of them
-// cannot take the attendee, Calnode emails the guest their own confirmation with the .ics
-// instead: an invite from both is better than none. Returns "calendar" or "email".
+// each event that holds the meeting (the shared organizer event, or every host's own), the
+// same way the booking's other guests were added, so Google Meet admits them without
+// knocking; a provider that emails guests (Microsoft) then sends the invite. When there is
+// no such event, any of them cannot take the attendee, or the provider emails nobody
+// (Google, see providerEventInvite), Calnode emails the guest their own confirmation with
+// the .ics instead - for Google, carrying the event's identity. An invite from both is
+// better than none. Returns "calendar" when the provider sent it, else "email".
 func (h *Handler) inviteNewGuest(ctx context.Context, b *booking.Booking, hosts []assignedHost, g mailer.Invitee) (string, error) {
 	if gc := h.getCal(); gc != nil && b.InviteDelivery != booking.InviteByCalnode {
-		attempted, failed := false, false
+		attempted, failed, quiet := false, false, false
 		for _, host := range hosts {
 			if host.InvitedViaOrganizer || host.ExternalEventID == "" {
 				continue // no event of their own: they are on the organizer's
 			}
 			attempted = true
-			err := gc.AddAttendees(ctx, host.UserID, host.ExternalCalendarID, host.ExternalEventID,
+			invited, err := gc.AddAttendees(ctx, host.UserID, host.ExternalCalendarID, host.ExternalEventID,
 				host.ExternalProvider, []calendar.Invitee{{Name: g.Name, Email: g.Email}})
 			if err != nil {
 				failed = true
@@ -194,9 +196,11 @@ func (h *Handler) inviteNewGuest(ctx context.Context, b *booking.Booking, hosts 
 					h.logger.ErrorContext(ctx, "add guest: add to calendar event", "error", err,
 						"booking_id", b.ID, "host", host.UserID)
 				}
+			} else if !invited {
+				quiet = true
 			}
 		}
-		if attempted && !failed {
+		if attempted && !failed && !quiet {
 			return "calendar", nil
 		}
 	}
@@ -212,5 +216,6 @@ func (h *Handler) inviteNewGuest(ctx context.Context, b *booking.Booking, hosts 
 	// .ics is their invite.
 	d.AttachICS = true
 	d.ICSSequence = int(b.UpdatedAt.Unix())
+	h.providerEventInvite(ctx, b, hosts).apply(&d)
 	return "email", mailer.SendConfirmationToAttendee(ctx, h.mailer, d.ForGuest(g))
 }

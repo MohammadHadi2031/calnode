@@ -327,6 +327,9 @@ func (h *Handler) rescheduleSideEffects(bCopy booking.Booking, capturedEtID stri
 		d.AttachICS = !providerInvites
 	}
 	d.ICSSequence = int(bCopy.UpdatedAt.Unix())
+	// Read after the move, so the .ics carries the SEQUENCE Google bumped.
+	inv := h.providerEventInvite(ctx, &bCopy, hosts)
+	inv.apply(&d)
 
 	prefs := h.hostPrefsOrDefault(ctx, bCopy.ID, bCopy.HostID)
 	var msgNote, subjNote sql.NullString
@@ -362,6 +365,7 @@ func (h *Handler) rescheduleSideEffects(bCopy booking.Booking, capturedEtID stri
 		if host.InvitedViaOrganizer && providerInvites {
 			hd.AttachICS = false // the shared event's update reached them from the provider
 		}
+		h.applyHostProviderInvite(ctx, &hd, host, inv)
 		if err := mailer.SendRescheduleToHost(ctx, h.mailer, hd); err != nil {
 			h.logger.Error("reschedule email (host)", "error", err, "booking_id", bCopy.ID, "host", host.UserID)
 		}

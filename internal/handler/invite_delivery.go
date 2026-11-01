@@ -87,10 +87,33 @@ func (h *Handler) applyInviteDelivery(ctx context.Context, d *mailer.BookingData
 // applyHostInvite turns booking email data into one host's own copy: organized by that
 // host, attached only when their calendar does not already hold the event, and - for a
 // Calnode-invited booking - without the booker as a guest (see ICSWithoutAttendee).
+//
+// The provider event's identity (an attendee copy's ICSUID…) is cleared: whether a host
+// gets that invite is applyHostProviderInvite's call.
 func (h *Handler) applyHostInvite(ctx context.Context, d *mailer.BookingData, mode, hostID string) {
 	d.HideHostInInvite = false
 	d.ICSWithoutAttendee = mode == booking.InviteByCalnode
-	d.AttachICS = h.noConnectedDestination(ctx, hostID)
+	d.ICSUID, d.ICSOrganizerName, d.ICSOrganizerEmail, d.ICSHostAttendee = "", "", "", false
+	d.AttachICS = h.hostCalendarLacksEvent(ctx, hostID)
+}
+
+// hostCalendarLacksEvent reports whether a host's own calendar will not show their
+// booking without our .ics: no destination, or one whose provider does not put events'
+// guests on them (CalDAV). Unlike noConnectedDestination - the booker's side - a Google
+// destination holds the host's event even though Google no longer emails anyone.
+func (h *Handler) hostCalendarLacksEvent(ctx context.Context, hostID string) bool {
+	gc := h.getCal()
+	if gc == nil {
+		return true
+	}
+	has, err := gc.HasDestination(ctx, hostID)
+	if err != nil {
+		return false
+	}
+	if !has {
+		return true
+	}
+	return !gc.ProviderPlacesGuests(gc.DestinationProvider(ctx, hostID))
 }
 
 // bookingInviteOrganizer returns the name and address a Calnode-sent invite is organized

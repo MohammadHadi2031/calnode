@@ -391,18 +391,13 @@ func (h *Handler) ResendConfirmation(w http.ResponseWriter, r *http.Request) {
 		hosts = []assignedHost{{UserID: b.HostID, Name: d.HostName, Email: d.HostEmail, IsPrimary: true}}
 	}
 	// Whether the hosts' calendars invited the booker and guests (calendar mode with an
-	// event written). Approximates the original send, which knew this from the events it
-	// had just created: a provider-invited booker must not get a second, differently
-	// UID'd .ics, and its guests were invited by the provider rather than by us.
-	providerInvites := false
-	if b.InviteDelivery != booking.InviteByCalnode {
-		for _, host := range hosts {
-			if host.ExternalEventID != "" || host.InvitedViaOrganizer {
-				providerInvites = true
-				break
-			}
-		}
-	}
+	// event written by a provider that emails its guests). Approximates the original send,
+	// which knew this from the events it had just created: a provider-invited booker must
+	// not get a second, differently UID'd .ics, and its guests were invited by the provider
+	// rather than by us. A Google event emails nobody, so its invite is resent as the
+	// original went: ours, carrying the event's identity (inv).
+	providerInvites := h.providerInvited(ctx, b.InviteDelivery, hosts)
+	inv := h.providerEventInvite(ctx, b, hosts)
 
 	sent, failed := 0, 0
 	count := func(err error) {
@@ -418,6 +413,7 @@ func (h *Handler) ResendConfirmation(w http.ResponseWriter, r *http.Request) {
 			if providerInvites {
 				hd.AttachICS = false
 			}
+			h.applyHostProviderInvite(ctx, &hd, host, inv)
 			count(mailer.SendConfirmationToHost(ctx, h.mailer, hd))
 		}
 	} else {
@@ -428,6 +424,7 @@ func (h *Handler) ResendConfirmation(w http.ResponseWriter, r *http.Request) {
 			d.AttachICS = !providerInvites
 		}
 		d.ICSSequence = int(b.UpdatedAt.Unix())
+		inv.apply(&d)
 		err := mailer.SendConfirmationToAttendee(ctx, h.mailer, d)
 		count(err)
 		if err == nil {

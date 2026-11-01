@@ -13,8 +13,8 @@ import (
 )
 
 // A PATCH replaces Google's whole attendee list, so adding a guest must send back the
-// attendees already there - RSVP state included - plus the new one, and ask Google to
-// email the invite.
+// attendees already there - RSVP state included - plus the new one. Google emails nobody:
+// Calnode sends the invite (wisegrid fork, InvitesGuests).
 func TestAddAttendees_keepsExistingAndInvites(t *testing.T) {
 	var patched map[string][]map[string]any
 	var patchQuery string
@@ -45,8 +45,8 @@ func TestAddAttendees_keepsExistingAndInvites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AddAttendees: %v", err)
 	}
-	if patchQuery != "sendUpdates=all" {
-		t.Errorf("query = %q; want sendUpdates=all so Google emails the invite", patchQuery)
+	if patchQuery != "sendUpdates=none" {
+		t.Errorf("query = %q; want sendUpdates=none: Calnode, not Google, emails the invite", patchQuery)
 	}
 	got := patched["attendees"]
 	if len(got) != 3 {
