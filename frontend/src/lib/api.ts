@@ -429,6 +429,8 @@ export type Conflict = {
 	host_name: string;
 	kind: ConflictKind | string;
 	detail?: string;
+	/** Start of the conflicting appointment (RFC3339 UTC), for the client to show in its zone. */
+	at?: string;
 };
 
 /** Body of a 409 from the staff booking / unavailable-block endpoints. */

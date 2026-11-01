@@ -286,10 +286,16 @@
 		</aside>
 
 		<!-- Main content -->
-		<main class="flex-1 overflow-y-auto bg-background">
-			<!-- The Schedule page is a week calendar: give it more room than the forms get. -->
-			<div class="mx-auto {isWide ? 'max-w-7xl px-4 sm:px-8' : 'max-w-4xl px-8'} py-8">
-				{@render children()}
+		<!-- scrollbar-gutter keeps the page from sliding sideways when it grows long enough to
+		     scroll (e.g. on expanding a booking). -->
+		<main class="flex-1 overflow-y-auto bg-background [scrollbar-gutter:stable]">
+			<!-- One outer frame for every page, so the content's left edge stays put when you
+			     move between pages. The Schedule page is a week calendar and uses the whole
+			     frame; the form pages keep a readable width inside it. -->
+			<div class="mx-auto max-w-7xl px-4 py-8 sm:px-8">
+				<div class={isWide ? '' : 'max-w-4xl'}>
+					{@render children()}
+				</div>
 			</div>
 		</main>
 	</div>

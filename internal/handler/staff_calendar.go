@@ -42,6 +42,10 @@ type staffConflict struct {
 	// calendar | calendar_unchecked.
 	Kind   string `json:"kind"`
 	Detail string `json:"detail"`
+	// At is the start of the conflicting appointment (RFC3339, UTC), when there is one.
+	// Detail never contains a time: the client shows At in the zone the viewer is
+	// looking at, which the server does not know.
+	At string `json:"at,omitempty"`
 }
 
 func (h *Handler) writeConflicts(w http.ResponseWriter, conflicts []staffConflict) {

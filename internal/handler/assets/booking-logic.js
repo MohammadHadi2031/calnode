@@ -28,6 +28,15 @@
   // ymd — "YYYY-MM-DD" for a local Date (the calendar grid's own day cells).
   function ymd(d) { return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
 
+  // todayInZone — today's date in the SELECTED tz, as a local-midnight Date, which is how the
+  // calendar grid represents its day cells. new Date() alone is the browser's today: a booker
+  // in Tehran who picks Los Angeles at 08:00 on the 3rd would see LA's still-open 2nd greyed
+  // out as past.
+  function todayInZone(tz, now) {
+    var p = dateKeyFromISO((now || new Date()).toISOString(), tz).split('-');
+    return new Date(+p[0], +p[1] - 1, +p[2]);
+  }
+
   // groupSlotsByDay — { "YYYY-MM-DD": [slot,…] } in the selected tz. Slots are {start,…} (or pass
   // a `key` selector for shapes that differ). Optionally drops one slot (reschedule excludes the
   // current booking's own time).
@@ -184,6 +193,7 @@
   return {
     dateKeyFromISO: dateKeyFromISO,
     ymd: ymd,
+    todayInZone: todayInZone,
     groupSlotsByDay: groupSlotsByDay,
     mergeDaySlots: mergeDaySlots,
     fmt: fmt,
