@@ -219,6 +219,15 @@ func TestStaffBooking_warnsThenForces(t *testing.T) {
 	if rec.Code != http.StatusConflict || strings.Join(conflictKinds(t, rec), ",") != "booking" {
 		t.Fatalf("overlapping staff booking: %d %s; want a booking conflict", rec.Code, rec.Body.String())
 	}
+	// The overlapped appointment's time is sent as an instant, for the client to show in the
+	// viewer's zone; the human text carries no time (it used to say "... at 10:00 UTC").
+	var overlap struct {
+		Conflicts []staffConflict `json:"conflicts"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &overlap); err != nil || len(overlap.Conflicts) != 1 ||
+		overlap.Conflicts[0].At != f.at("10:00") || strings.Contains(overlap.Conflicts[0].Detail, "UTC") {
+		t.Errorf("booking conflict = %s; want at=%s and no time in the detail", rec.Body.String(), f.at("10:00"))
+	}
 	rec = f.as(t, f.secretary, f.h.CreateStaffBooking, "POST", "/v1/staff/bookings", body(f.at("10:15"), f.at("11:15"), true), "")
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("forced staff booking: %d %s; want 201", rec.Code, rec.Body.String())

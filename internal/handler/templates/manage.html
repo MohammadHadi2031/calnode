@@ -272,8 +272,14 @@ body {
 
   let TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || ORG_TZ || 'UTC';
 
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const maxDate = MAX_DAYS > 0 ? new Date(today.getTime() + MAX_DAYS * 86400000) : null;
+  // "Today" is today in the SELECTED zone, not the browser's (see book.html). Recomputed
+  // when the zone changes.
+  let today, maxDate;
+  function setToday() {
+    today = BookingLogic.todayInZone(TZ);
+    maxDate = MAX_DAYS > 0 ? new Date(today.getTime() + MAX_DAYS * 86400000) : null;
+  }
+  setToday();
 
   let navYear = today.getFullYear(), navMonth = today.getMonth();
   let pickedDate = null, slotsCache = [], pickedSlot = null;
@@ -667,6 +673,7 @@ body {
   if (tzSel) {
     tzSel.addEventListener('change', async e => {
       TZ = e.target.value;
+      setToday();
       resizeTzSelect();
       $('current-time').textContent = fmtDatetime(CURRENT_ISO);
       if (pickedSlot) {
