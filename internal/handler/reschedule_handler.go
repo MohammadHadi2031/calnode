@@ -52,11 +52,12 @@ func (h *Handler) RescheduleBooking(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	// Who may reschedule: the host, an admin, or the host's secretary (canManageHost), the
-	// same people the Bookings page shows the booking to. It used to be the host alone,
-	// so an admin's or secretary's reschedule button answered "booking not found".
+	// Who may reschedule: any host with a seat on the booking (co-hosts included), an
+	// admin, or the primary host's secretary (mayManageBooking), the same people the
+	// Bookings page shows the booking to. It used to be the primary host alone, so an
+	// admin's, secretary's or co-host's reschedule button answered "booking not found".
 	// Return 404 for unauthorized access to avoid leaking booking IDs.
-	if ok, err := h.canManageHost(r.Context(), user, hostID); err != nil {
+	if ok, err := h.mayManageBooking(r.Context(), user, id); err != nil {
 		h.logger.ErrorContext(r.Context(), "reschedule booking: access", "error", err)
 		h.writeError(w, http.StatusInternalServerError, "internal error")
 		return

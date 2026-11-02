@@ -352,7 +352,7 @@ func (h *Handler) GetStaffCalendar(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	bookings, err := h.staffCalendarBookings(ctx, hostIDs, from, to, manageable)
+	bookings, err := h.staffCalendarBookings(ctx, actor.ID, hostIDs, from, to, manageable)
 	if err != nil {
 		h.logger.ErrorContext(ctx, "staff calendar: bookings", "error", err)
 		h.writeError(w, http.StatusInternalServerError, "internal error")
@@ -414,7 +414,7 @@ func (h *Handler) GetStaffCalendar(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (h *Handler) staffCalendarBookings(ctx context.Context, hostIDs []string, from, to time.Time, manageable map[string]bool) ([]staffCalendarBooking, error) {
+func (h *Handler) staffCalendarBookings(ctx context.Context, actorID string, hostIDs []string, from, to time.Time, manageable map[string]bool) ([]staffCalendarBooking, error) {
 	out := []staffCalendarBooking{}
 	if len(hostIDs) == 0 {
 		return out, nil
@@ -468,6 +468,12 @@ func (h *Handler) staffCalendarBookings(ctx context.Context, hostIDs []string, f
 	if err := h.scanPairs(ctx, bookingSeatsQuery, ids,
 		func(id, v string) { out[index[id]].HostIDs = append(out[index[id]].HostIDs, v) }); err != nil {
 		return nil, err
+	}
+	// A co-host manages the meetings they sit on, as on the Bookings page (mayManageBooking).
+	for i := range out {
+		if !out[i].CanManage && slices.Contains(out[i].HostIDs, actorID) {
+			out[i].CanManage = true
+		}
 	}
 	if err := h.scanPairs(ctx, bookingGuestEmailsQuery, ids,
 		func(id, v string) { out[index[id]].Guests = append(out[index[id]].Guests, v) }); err != nil {
@@ -737,8 +743,9 @@ func (h *Handler) CreateStaffBooking(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// loadManagedBooking loads booking id for a staff action and checks the actor manages its
-// primary host. Writes the response and returns nil on failure (404 when not visible).
+// loadManagedBooking loads booking id for a staff action and checks the actor may manage
+// it (mayManageBooking: admin, a host with a seat on it, or its primary host's
+// secretary). Writes the response and returns nil on failure (404 when not visible).
 func (h *Handler) loadManagedBooking(w http.ResponseWriter, r *http.Request, actor AuthUser) *booking.Booking {
 	b, err := h.bookingSvc.Get(r.Context(), r.PathValue("id"))
 	if errors.Is(err, booking.ErrNotFound) || errors.Is(err, sql.ErrNoRows) {
@@ -750,7 +757,7 @@ func (h *Handler) loadManagedBooking(w http.ResponseWriter, r *http.Request, act
 		h.writeError(w, http.StatusInternalServerError, "internal error")
 		return nil
 	}
-	ok, err := h.canManageHost(r.Context(), actor, b.HostID)
+	ok, err := h.mayManageBooking(r.Context(), actor, b.ID)
 	if err != nil {
 		h.logger.ErrorContext(r.Context(), "staff booking: access", "error", err)
 		h.writeError(w, http.StatusInternalServerError, "internal error")

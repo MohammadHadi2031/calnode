@@ -106,3 +106,19 @@ The dialog has one **Attendees** list with **Add attendee**. The first person is
 - **Slot grid for several hosts:** slot starts follow the event type owner's clock
   (`slots.Request.AlignTZ`), not the first host in priority order, so reordering hosts
   no longer moves every slot. A lone host keeps their own clock.
+
+## Co-hosts manage their shared bookings (0.11.2-wisegrid.11)
+
+- A host with a seat on a booking (`booking_hosts`), primary or co-host, may reschedule
+  and cancel it on the Bookings page and move or cancel it on the Schedule page, where
+  it now comes back with `can_manage: true`. Before, only the primary host, an admin or
+  the primary host's secretary could, and a co-host's buttons answered
+  "booking not found".
+- One rule covers every per-booking action: `mayManageBooking` (`staff_access.go`) —
+  admin, any seat holder, or the primary host's secretary. The email log, resends and
+  adding guests already used it (`canManageBooking`); cancel, reschedule and the
+  Schedule's move/cancel now do too. Someone with no seat still gets 404.
+- `force` is unchanged: a co-host moving a shared meeting can't push it over a conflict
+  of a host they don't manage (the primary host, say); that conflict stays blocking.
+- MCP tools keep their own scope (members act on bookings where they are the primary
+  host).

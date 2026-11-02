@@ -1940,16 +1940,13 @@ func (h *Handler) CancelBooking(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Admins (and the owner) may cancel any booking — needed to resolve a
-	// departing member's meetings. Non-admin hosts can cancel only their own.
-	// A secretary may cancel the bookings of the hosts they manage, as on the Schedule
-	// page (canManageHost); the Bookings page now lists those bookings to them.
-	var cancelErr error
-	if user.IsAdmin || h.managesBookingHostAsSecretary(r.Context(), user, id) {
-		cancelErr = h.bookingSvc.CancelByID(r.Context(), id, attribution)
-	} else {
-		cancelErr = h.bookingSvc.Cancel(r.Context(), user.ID, id, attribution)
+	// departing member's meetings. A host may cancel any booking they hold a seat on,
+	// co-hosts included (they used to get "booking not found"), and a secretary the
+	// bookings of the hosts they manage. Same rule as the email log (mayManageBooking).
+	if !h.canManageBooking(w, r, user, id) {
+		return
 	}
-	if err := cancelErr; err != nil {
+	if err := h.bookingSvc.CancelByID(r.Context(), id, attribution); err != nil {
 		switch {
 		case errors.Is(err, booking.ErrNotFound):
 			h.writeError(w, http.StatusNotFound, "booking not found")

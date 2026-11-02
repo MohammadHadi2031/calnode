@@ -28,18 +28,20 @@ func (h *Handler) canManageHost(ctx context.Context, actor AuthUser, hostID stri
 	return n > 0, err
 }
 
-// managesBookingHostAsSecretary reports whether actor is the secretary of booking id's
-// primary host (and not that host). False on any error: callers fall back to the
-// host-only rule.
-func (h *Handler) managesBookingHostAsSecretary(ctx context.Context, actor AuthUser, bookingID string) bool {
+// mayManageBooking reports whether actor may act on one booking: cancel, reschedule or
+// move it, and use its email log, resends and guests. Admins may for every booking, a
+// host for any booking they hold a seat on (primary host or co-host, the bookings list's
+// visibility rule), and the secretary of the booking's primary host. A booking that does
+// not exist reports false.
+func (h *Handler) mayManageBooking(ctx context.Context, actor AuthUser, bookingID string) (bool, error) {
 	var n int
-	if err := h.db.QueryRowContext(ctx, `
+	err := h.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM bookings b
-		JOIN secretary_hosts sh ON sh.host_id = b.host_id AND sh.secretary_id = ?
-		WHERE b.id = ? AND b.host_id != ?`, actor.ID, bookingID, actor.ID).Scan(&n); err != nil {
-		return false
-	}
-	return n > 0
+		WHERE b.id = ? AND (? OR b.host_id = ?
+		  OR EXISTS (SELECT 1 FROM booking_hosts bh WHERE bh.booking_id = b.id AND bh.user_id = ?)
+		  OR EXISTS (SELECT 1 FROM secretary_hosts sh WHERE sh.secretary_id = ? AND sh.host_id = b.host_id))`,
+		bookingID, actor.IsAdmin, actor.ID, actor.ID, actor.ID).Scan(&n)
+	return n > 0, err
 }
 
 // secretaryHostIDs returns the hosts assigned to secretaryID, oldest assignment first.
