@@ -904,6 +904,11 @@ func (h *Handler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if guests, err = h.dropHostGuests(r.Context(), et.ID, guests); err != nil {
+		h.logger.ErrorContext(r.Context(), "create booking: host guests", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 
 	// Validate intake question answers.
 	answers, err := h.validateAnswers(w, r, et.ID, loc, req.Answers)
@@ -1642,8 +1647,9 @@ var bookingStatuses = map[string]bool{"confirmed": true, "cancelled": true, "res
 var errNoMatches = errors.New("filter matches nothing")
 
 // parseBookingListFilter turns the query string into a booking.ListFilter, applying
-// the visibility rule: members are pinned to bookings they host, and only an admin
-// may widen to the workspace with ?scope=all. Every other filter narrows further, so
+// the visibility rule: members are pinned to bookings they host, a secretary may ask
+// for their hosts' bookings with ?scope=managed, and only an admin may widen to the
+// workspace with ?scope=all. Every other filter narrows further, so
 // a member passing host= or team= can never see more than their own bookings.
 func (h *Handler) parseBookingListFilter(ctx context.Context, q url.Values, user AuthUser) (booking.ListFilter, error) {
 	f := booking.ListFilter{
@@ -1653,7 +1659,14 @@ func (h *Handler) parseBookingListFilter(ctx context.Context, q url.Values, user
 		TeamID: q.Get("team"),
 		Order:  q.Get("order"),
 	}
-	if !(q.Get("scope") == "all" && user.IsAdmin) {
+	switch {
+	case q.Get("scope") == "all" && user.IsAdmin:
+		// the whole workspace
+	case q.Get("scope") == "managed":
+		// A secretary's view: the bookings of the hosts they manage (wisegrid fork). Safe
+		// for anyone: with no secretary_hosts rows it is simply empty.
+		f.ManagedBy = user.ID
+	default:
 		f.ViewerID = user.ID
 	}
 
@@ -1764,9 +1777,18 @@ func (h *Handler) ListBookings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// total is what the page is paging through: the selected tab, not both. It used to be
+	// both, so "Upcoming (1)" said "1–1 of 30" and Next led to an empty page.
+	total := counts.Total()
+	switch f.When {
+	case "upcoming":
+		total = counts.Upcoming
+	case "past":
+		total = counts.Past
+	}
 	h.writeJSON(w, http.StatusOK, map[string]any{
 		"items":  items,
-		"total":  counts.Total(),
+		"total":  total,
 		"counts": map[string]int{"upcoming": counts.Upcoming, "past": counts.Past},
 		"limit":  f.Limit,
 		"offset": f.Offset,
@@ -1919,8 +1941,10 @@ func (h *Handler) CancelBooking(w http.ResponseWriter, r *http.Request) {
 
 	// Admins (and the owner) may cancel any booking — needed to resolve a
 	// departing member's meetings. Non-admin hosts can cancel only their own.
+	// A secretary may cancel the bookings of the hosts they manage, as on the Schedule
+	// page (canManageHost); the Bookings page now lists those bookings to them.
 	var cancelErr error
-	if user.IsAdmin {
+	if user.IsAdmin || h.managesBookingHostAsSecretary(r.Context(), user, id) {
 		cancelErr = h.bookingSvc.CancelByID(r.Context(), id, attribution)
 	} else {
 		cancelErr = h.bookingSvc.Cancel(r.Context(), user.ID, id, attribution)

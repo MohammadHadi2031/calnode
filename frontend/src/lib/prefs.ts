@@ -1,7 +1,7 @@
 import { writable, get } from 'svelte/store';
 import type { User } from './api';
 import { DateTime } from 'luxon';
-import { resolveZone, zoneLabel } from './timezones';
+import { resolveZone, zoneLabel, zoneOffset } from './timezones';
 
 export interface UserPrefs {
 	timezone: string;
@@ -63,9 +63,24 @@ export function fmtTime(iso: string, p: UserPrefs = get(prefs)): string {
 	return dt.isValid ? fmtTimePart(dt, p) : iso;
 }
 
-/** "Asia/Tehran (UTC+03:30)": names the zone fmtDateTime and fmtTime use. */
-export function fmtZone(p: UserPrefs = get(prefs)): string {
-	return zoneLabel(zoneOf(p));
+/**
+ * "Asia/Tehran (UTC+03:30)": names the zone fmtDateTime and fmtTime use. The offset is the
+ * one in force at `at` (default: now), so a DST zone is labelled correctly for the time shown.
+ */
+export function fmtZone(p: UserPrefs = get(prefs), at?: string | DateTime): string {
+	const dt = typeof at === 'string' ? DateTime.fromISO(at) : at;
+	return zoneLabel(zoneOf(p), dt?.isValid ? dt : undefined);
+}
+
+/** The profile zone's UTC offset at an instant ("UTC-04:00"), or "" for an unparseable one. */
+export function fmtOffsetAt(iso: string, p: UserPrefs = get(prefs)): string {
+	const dt = DateTime.fromISO(iso);
+	return dt.isValid ? zoneOffset(zoneOf(p), dt) : '';
+}
+
+/** The profile zone, resolved to a valid IANA name (the browser's if the profile has none). */
+export function profileZone(p: UserPrefs = get(prefs)): string {
+	return zoneOf(p);
 }
 
 export const WEEK_DAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];

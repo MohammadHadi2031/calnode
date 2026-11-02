@@ -42,6 +42,49 @@ type staffConflict struct {
 	// calendar | calendar_unchecked.
 	Kind   string `json:"kind"`
 	Detail string `json:"detail"`
+	// At is the start of the conflicting appointment (RFC3339, UTC), when there is one.
+	// Detail never contains a time: the client shows At in the zone the viewer is
+	// looking at, which the server does not know.
+	At string `json:"at,omitempty"`
+	// Blocking: force will not override this one, because the caller does not manage
+	// the host it belongs to (a co-host on a collective event, say). Clients treat it
+	// like past and same_start.
+	Blocking bool `json:"blocking,omitempty"`
+}
+
+// checkStaffConflicts lists the conflicts for hostIDs that stand in the way of a staff
+// booking or move by actor. Force overrides a conflict only for a host the actor
+// manages: a secretary may book her host onto a busy slot, but not a co-host she has
+// no say over. So with force, only unmanaged hosts are checked; without it, every host
+// is, and the unmanaged ones come back marked Blocking so the client offers no
+// "save anyway".
+func (h *Handler) checkStaffConflicts(ctx context.Context, actor AuthUser, eventTypeID string, hostIDs []string, start, end time.Time, excludeBookingID string, force bool) ([]staffConflict, error) {
+	unmanaged := map[string]bool{}
+	var check []string
+	for _, id := range hostIDs {
+		ok, err := h.canManageHost(ctx, actor, id)
+		if err != nil {
+			return nil, err
+		}
+		unmanaged[id] = !ok
+		if !force || !ok {
+			check = append(check, id)
+		}
+	}
+	if len(check) == 0 {
+		return nil, nil
+	}
+	conflicts, err := h.staffConflicts(ctx, eventTypeID, check, start, end, excludeBookingID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range conflicts {
+		if unmanaged[conflicts[i].HostID] {
+			conflicts[i].Blocking = true
+			conflicts[i].Detail += " (you don't manage this host's calendar, so this can't be overridden)"
+		}
+	}
+	return conflicts, nil
 }
 
 func (h *Handler) writeConflicts(w http.ResponseWriter, conflicts []staffConflict) {
@@ -144,6 +187,17 @@ type staffEventType struct {
 	DurationMinutes       int    `json:"duration_minutes"`
 	LocationType          string `json:"location_type"`
 	AllowConferenceChoice bool   `json:"allow_conference_choice"`
+	RoutingMode           string `json:"routing_mode"`
+	// CoHosts are the other required hosts: booking this event type for the host books
+	// them too. The Schedule dialog names them and shows their local time, and prefers
+	// an event type without co-hosts as its default.
+	CoHosts []staffCoHost `json:"co_hosts"`
+}
+
+type staffCoHost struct {
+	ID       string `json:"id"`
+	Name     string `json:"name"`
+	Timezone string `json:"timezone"`
 }
 
 // ListStaffHosts handles GET /v1/staff/hosts.
@@ -165,7 +219,7 @@ func (h *Handler) ListStaffHosts(w http.ResponseWriter, r *http.Request) {
 	for _, m := range hosts {
 		ho := hostOut{managedHost: m, EventTypes: []staffEventType{}}
 		rows, err := h.db.QueryContext(r.Context(), `
-			SELECT et.id, et.slug, et.name, et.duration_minutes, et.location_type, et.allow_conference_choice
+			SELECT et.id, et.slug, et.name, et.duration_minutes, et.location_type, et.allow_conference_choice, et.routing_mode
 			FROM event_types et JOIN event_type_hosts eth ON eth.event_type_id = et.id
 			WHERE eth.user_id = ? AND et.is_active = 1 AND et.archived_at IS NULL
 			ORDER BY et.display_order, et.name COLLATE NOCASE`, m.ID)
@@ -175,8 +229,8 @@ func (h *Handler) ListStaffHosts(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for rows.Next() {
-			var e staffEventType
-			if err := rows.Scan(&e.ID, &e.Slug, &e.Name, &e.DurationMinutes, &e.LocationType, &e.AllowConferenceChoice); err != nil {
+			e := staffEventType{CoHosts: []staffCoHost{}}
+			if err := rows.Scan(&e.ID, &e.Slug, &e.Name, &e.DurationMinutes, &e.LocationType, &e.AllowConferenceChoice, &e.RoutingMode); err != nil {
 				rows.Close() // #nosec G104 -- already returning the scan error
 				h.logger.ErrorContext(r.Context(), "staff hosts: scan event type", "error", err)
 				h.writeError(w, http.StatusInternalServerError, "internal error")
@@ -185,12 +239,44 @@ func (h *Handler) ListStaffHosts(w http.ResponseWriter, r *http.Request) {
 			ho.EventTypes = append(ho.EventTypes, e)
 		}
 		rows.Close() // #nosec G104 -- fully consumed
+		// Co-hosts in a second pass: querying inside the open cursor above would deadlock
+		// the single-connection pool.
+		for i := range ho.EventTypes {
+			co, err := h.staffCoHosts(r.Context(), ho.EventTypes[i].ID, m.ID)
+			if err != nil {
+				h.logger.ErrorContext(r.Context(), "staff hosts: co-hosts", "error", err)
+				h.writeError(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+			ho.EventTypes[i].CoHosts = co
+		}
 		if gc != nil {
 			ho.HasCalendar, _ = gc.HasDestination(r.Context(), m.ID)
 		}
 		out = append(out, ho)
 	}
 	h.writeJSON(w, http.StatusOK, map[string]any{"hosts": out})
+}
+
+// staffCoHosts lists eventTypeID's required hosts other than hostID (active users only).
+func (h *Handler) staffCoHosts(ctx context.Context, eventTypeID, hostID string) ([]staffCoHost, error) {
+	rows, err := h.db.QueryContext(ctx, `
+		SELECT u.id, u.name, u.iana_timezone FROM event_type_hosts eth JOIN users u ON u.id = eth.user_id
+		WHERE eth.event_type_id = ? AND eth.user_id != ? AND eth.role = 'required' AND u.archived_at IS NULL
+		ORDER BY eth.priority, u.name`, eventTypeID, hostID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []staffCoHost{}
+	for rows.Next() {
+		var c staffCoHost
+		if err := rows.Scan(&c.ID, &c.Name, &c.Timezone); err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 // --- GET /v1/staff/calendar -----------------------------------------------------------
@@ -532,6 +618,11 @@ func (h *Handler) CreateStaffBooking(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if guests, err = h.dropHostGuests(ctx, et.ID, guests); err != nil {
+		h.logger.ErrorContext(ctx, "staff booking: host guests", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	nameGuests(guests, req.Guests)
 	locValue := ""
 	if et.LocationValue != nil {
@@ -578,17 +669,13 @@ func (h *Handler) CreateStaffBooking(w http.ResponseWriter, r *http.Request) {
 	if et.RoutingMode != "round_robin" || len(candidates) == 1 {
 		attending = append(attending, candidates...)
 	}
-	if !req.Force {
-		conflicts, err := h.staffConflicts(ctx, et.ID, attending, start, end, "")
-		if err != nil {
-			h.logger.ErrorContext(ctx, "staff booking: conflicts", "error", err)
-			h.writeError(w, http.StatusInternalServerError, "internal error")
-			return
-		}
-		if len(conflicts) > 0 {
-			h.writeConflicts(w, conflicts)
-			return
-		}
+	if conflicts, err := h.checkStaffConflicts(ctx, actor, et.ID, attending, start, end, "", req.Force); err != nil {
+		h.logger.ErrorContext(ctx, "staff booking: conflicts", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	} else if len(conflicts) > 0 {
+		h.writeConflicts(w, conflicts)
+		return
 	}
 	// Optional hosts join only when nothing is in their way; they never raise a warning.
 	var freeOptional []string
@@ -699,6 +786,12 @@ func (h *Handler) MoveStaffBooking(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusConflict, "this booking has been cancelled")
 		return
 	}
+	// A meeting that has already happened stays where it happened: dragging it into the
+	// future would re-send invites for a meeting that is over.
+	if !b.EndAt.After(time.Now()) {
+		h.writeError(w, http.StatusConflict, "this appointment has already ended and can't be moved")
+		return
+	}
 	start, err := time.Parse(time.RFC3339, req.StartAt)
 	if err != nil {
 		h.writeError(w, http.StatusBadRequest, "start_at must be RFC3339")
@@ -737,17 +830,13 @@ func (h *Handler) MoveStaffBooking(w http.ResponseWriter, r *http.Request) {
 			hostIDs = append(hostIDs, ah.UserID)
 		}
 	}
-	if !req.Force {
-		conflicts, err := h.staffConflicts(ctx, b.EventTypeID, hostIDs, start, end, b.ID)
-		if err != nil {
-			h.logger.ErrorContext(ctx, "staff move: conflicts", "error", err)
-			h.writeError(w, http.StatusInternalServerError, "internal error")
-			return
-		}
-		if len(conflicts) > 0 {
-			h.writeConflicts(w, conflicts)
-			return
-		}
+	if conflicts, err := h.checkStaffConflicts(ctx, actor, b.EventTypeID, hostIDs, start, end, b.ID, req.Force); err != nil {
+		h.logger.ErrorContext(ctx, "staff move: conflicts", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	} else if len(conflicts) > 0 {
+		h.writeConflicts(w, conflicts)
+		return
 	}
 
 	previousStart, previousEnd := b.StartAt, b.EndAt

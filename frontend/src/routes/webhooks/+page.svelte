@@ -6,8 +6,9 @@
 	import { Input } from '$lib/components/ui/input';
 	import { Label } from '$lib/components/ui/label';
 	import { Checkbox } from '$lib/components/ui/checkbox';
-	import { Badge } from '$lib/components/ui/badge';
+	import { Switch } from '$lib/components/ui/switch';
 	import * as Tooltip from '$lib/components/ui/tooltip';
+	import { toast } from 'svelte-sonner';
 
 	let items: Webhook[] = $state([]);
 	let loading = $state(true);
@@ -127,6 +128,24 @@
 			await load();
 		} catch (e: any) {
 			error = e.message;
+		}
+	}
+
+	// Pause or resume a webhook. Paused, it is sent nothing — including deliveries still
+	// waiting to retry — and events from the paused period are not sent on resume.
+	let toggling: Record<string, boolean> = $state({});
+	async function setActive(wh: Webhook, on: boolean) {
+		toggling[wh.id] = true;
+		const before = wh.is_active;
+		wh.is_active = on; // show the new state at once; reverted below if the save fails
+		try {
+			await api.patch(`/v1/webhooks/${wh.id}`, { is_active: on });
+			toast.success(on ? 'Webhook enabled' : 'Webhook disabled — nothing is sent until you enable it');
+		} catch (e: any) {
+			wh.is_active = before;
+			toast.error(e?.message || 'Could not update the webhook');
+		} finally {
+			toggling[wh.id] = false;
 		}
 	}
 
@@ -264,17 +283,32 @@
 				<Tooltip.Provider>
 					{#each items as wh}
 						<tr class="transition-colors hover:bg-muted/30">
-							<td class="max-w-xs overflow-hidden text-ellipsis whitespace-nowrap px-4 py-3 font-mono text-xs">{wh.url}</td>
+							<td class="max-w-xs overflow-hidden text-ellipsis whitespace-nowrap px-4 py-3 font-mono text-xs {wh.is_active ? '' : 'text-muted-foreground'}" title={wh.url}>{wh.url}</td>
 							<td class="px-4 py-3 text-xs text-muted-foreground">{(wh.events ?? []).join(', ')}</td>
-							<td class="px-4 py-3 text-xs text-muted-foreground">{(wh.fields ?? []).length} fields</td>
+							<td class="whitespace-nowrap px-4 py-3 text-xs text-muted-foreground">{(wh.fields ?? []).length} fields</td>
 							<td class="px-4 py-3">
-								{#if wh.is_active}
-									<Badge class="bg-green-50 text-green-700 border-green-200">Active</Badge>
-								{:else}
-									<Badge variant="secondary">Inactive</Badge>
-								{/if}
+								<Tooltip.Root>
+									<Tooltip.Trigger>
+										{#snippet child({ props })}
+											<label {...props} class="flex w-24 cursor-pointer items-center gap-2 text-xs">
+												<Switch
+													checked={wh.is_active}
+													disabled={toggling[wh.id]}
+													onCheckedChange={(v) => setActive(wh, v)}
+													aria-label="{wh.is_active ? 'Disable' : 'Enable'} webhook {wh.url}"
+												/>
+												<span class={wh.is_active ? 'font-medium text-green-700' : 'text-muted-foreground'}>{wh.is_active ? 'Enabled' : 'Disabled'}</span>
+											</label>
+										{/snippet}
+									</Tooltip.Trigger>
+									<Tooltip.Content>
+										{wh.is_active
+											? 'Turn off to stop sending to this endpoint. Events that happen while it is off are not sent later.'
+											: 'Off: nothing is sent. Turn on to start sending new events again.'}
+									</Tooltip.Content>
+								</Tooltip.Root>
 							</td>
-							<td class="px-4 py-3 text-muted-foreground">{fmtDate(wh.created_at)}</td>
+							<td class="whitespace-nowrap px-4 py-3 text-muted-foreground">{fmtDate(wh.created_at)}</td>
 							<td class="px-4 py-3 text-right whitespace-nowrap">
 								<Tooltip.Root>
 									<Tooltip.Trigger class={buttonVariants({ variant: 'ghost', size: 'icon' })} onclick={() => toggleDeliveries(wh.id)}>
@@ -313,7 +347,7 @@
 													<tr>
 														<td class="py-1 pr-4 font-mono">{d.event}</td>
 														<td class="py-1 pr-4">
-															<span class={d.status === 'delivered' ? 'text-green-700' : d.status === 'failed' ? 'text-destructive' : 'text-muted-foreground'}>{d.status}</span>
+															<span class={d.status === 'success' || d.status === 'delivered' ? 'text-green-700' : d.status === 'failed' ? 'text-destructive' : 'text-muted-foreground'}>{d.status}</span>
 														</td>
 														<td class="py-1 pr-4">{d.response_status ?? '—'}</td>
 														<td class="py-1 pr-4">{d.attempt_count}</td>

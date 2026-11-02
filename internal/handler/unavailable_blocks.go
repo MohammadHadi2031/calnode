@@ -125,10 +125,11 @@ func (h *Handler) bookingOverlapConflicts(ctx context.Context, hostID, hostName 
 		if who != "" {
 			detail = "overlaps the appointment with " + who
 		}
+		c := staffConflict{HostID: hostID, HostName: hostName, Kind: "booking", Detail: detail}
 		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
-			detail += " at " + t.UTC().Format("2006-01-02 15:04 UTC")
+			c.At = t.UTC().Format(time.RFC3339)
 		}
-		out = append(out, staffConflict{HostID: hostID, HostName: hostName, Kind: "booking", Detail: detail})
+		out = append(out, c)
 	}
 	return out, rows.Err()
 }

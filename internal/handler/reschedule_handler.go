@@ -52,8 +52,15 @@ func (h *Handler) RescheduleBooking(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	// Who may reschedule: the host, an admin, or the host's secretary (canManageHost), the
+	// same people the Bookings page shows the booking to. It used to be the host alone,
+	// so an admin's or secretary's reschedule button answered "booking not found".
 	// Return 404 for unauthorized access to avoid leaking booking IDs.
-	if hostID != user.ID {
+	if ok, err := h.canManageHost(r.Context(), user, hostID); err != nil {
+		h.logger.ErrorContext(r.Context(), "reschedule booking: access", "error", err)
+		h.writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	} else if !ok {
 		h.writeError(w, http.StatusNotFound, "booking not found")
 		return
 	}
@@ -82,7 +89,14 @@ func (h *Handler) RescheduleBooking(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	newEnd := newStart.Add(time.Duration(durMins) * time.Minute)
+	// Keep the booking's own length. A staff appointment can be longer or shorter than
+	// the event type (dragged or resized on the Schedule page); rescheduling used to
+	// reset it to the event type's duration without saying so.
+	length := previousEnd.Sub(previousStart)
+	if length <= 0 {
+		length = time.Duration(durMins) * time.Minute
+	}
+	newEnd := newStart.Add(length)
 
 	if err := h.validateRescheduleTime(r.Context(), id, etID, hostID, newStart, newEnd); err != nil {
 		if errors.Is(err, errSlotUnavailable) {

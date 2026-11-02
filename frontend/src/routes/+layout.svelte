@@ -10,11 +10,20 @@
 	import { buttonVariants } from '$lib/components/ui/button';
 	import * as Dialog from '$lib/components/ui/dialog';
 	import DemoBanner from '$lib/components/demo-banner.svelte';
+	import MenuIcon from '@lucide/svelte/icons/menu';
+	import XIcon from '@lucide/svelte/icons/x';
 	import type { Snippet } from 'svelte';
 
 	let { children }: { children: Snippet } = $props();
 
 	let checking = $state(true);
+	// Phone/tablet: the sidebar is a slide-in menu instead of a permanent 224px column
+	// that left the pages ~170px to work with. Closes on navigation.
+	let navOpen = $state(false);
+	$effect(() => {
+		void $page.url.pathname;
+		navOpen = false;
+	});
 	let reportOpen = $state(false);
 	let recordingsConfigured = $state(false);
 	let version = $state('');
@@ -190,6 +199,7 @@
 </script>
 
 <Toaster position="bottom-right" />
+<svelte:window onkeydown={(e) => { if (e.key === 'Escape') navOpen = false; }} />
 
 {#if isPublicRoute}
 	{@render children()}
@@ -202,9 +212,37 @@
 	{#if $authStatus.demo_mode}
 		<DemoBanner />
 	{/if}
-	<div class="flex flex-1 overflow-hidden">
-		<!-- Sidebar -->
-		<aside class="flex w-56 shrink-0 flex-col border-r border-sidebar-border bg-sidebar">
+	<!-- Top bar, below md only: opens the menu. -->
+	<header class="flex h-12 shrink-0 items-center gap-2 border-b border-sidebar-border bg-sidebar px-2 md:hidden">
+		<button
+			type="button"
+			class={buttonVariants({ variant: 'ghost', size: 'icon' })}
+			onclick={() => (navOpen = true)}
+			aria-label="Open menu"
+			aria-expanded={navOpen}
+			aria-controls="app-sidebar"
+		>
+			<MenuIcon class="size-5" />
+		</button>
+		<span class="truncate text-sm font-semibold">{visibleNavItems.find((i) => (i.exact ? $page.url.pathname === i.href || $page.url.pathname === base : $page.url.pathname.startsWith(i.href)))?.label ?? 'Calnode'}</span>
+	</header>
+	<div class="relative flex flex-1 overflow-hidden">
+		{#if navOpen}
+			<button type="button" class="fixed inset-0 z-30 bg-black/40 md:hidden" aria-label="Close menu" onclick={() => (navOpen = false)}></button>
+		{/if}
+		<!-- Sidebar: a column from md up; below that, a drawer over the page. -->
+		<aside
+			id="app-sidebar"
+			class="fixed inset-y-0 left-0 z-40 flex w-64 shrink-0 flex-col border-r border-sidebar-border bg-sidebar transition-transform duration-200 md:static md:z-auto md:w-56 md:translate-x-0 {navOpen ? 'translate-x-0 shadow-xl' : '-translate-x-full'}"
+		>
+			<button
+				type="button"
+				class="{buttonVariants({ variant: 'ghost', size: 'icon-sm' })} absolute right-2 top-2.5 md:hidden"
+				onclick={() => (navOpen = false)}
+				aria-label="Close menu"
+			>
+				<XIcon class="size-4" />
+			</button>
 			<!-- User section -->
 			<a href="{base}/settings/profile" class="flex items-center gap-3 border-b border-sidebar-border px-4 py-3 hover:bg-sidebar-accent/60 transition-colors">
 				<!-- Fixed-size clip container: the image fills it and is clipped by the
@@ -286,10 +324,16 @@
 		</aside>
 
 		<!-- Main content -->
-		<main class="flex-1 overflow-y-auto bg-background">
-			<!-- The Schedule page is a week calendar: give it more room than the forms get. -->
-			<div class="mx-auto {isWide ? 'max-w-7xl px-4 sm:px-8' : 'max-w-4xl px-8'} py-8">
-				{@render children()}
+		<!-- scrollbar-gutter keeps the page from sliding sideways when it grows long enough to
+		     scroll (e.g. on expanding a booking). -->
+		<main class="flex-1 overflow-y-auto bg-background [scrollbar-gutter:stable]">
+			<!-- One outer frame for every page, so the content's left edge stays put when you
+			     move between pages. The Schedule page is a week calendar and uses the whole
+			     frame; the form pages keep a readable width inside it. -->
+			<div class="mx-auto max-w-7xl px-4 py-8 sm:px-8">
+				<div class={isWide ? '' : 'max-w-4xl'}>
+					{@render children()}
+				</div>
 			</div>
 		</main>
 	</div>

@@ -305,8 +305,14 @@ body {
   function t(key) { return I18N[key] || key; } // key itself as a last-resort fallback, matching Locale.T server-side
   let TZ         = Intl.DateTimeFormat().resolvedOptions().timeZone;
 
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  const maxDate = MAX_DAYS > 0 ? new Date(today.getTime() + MAX_DAYS * 86400000) : null;
+  // "Today" is today in the SELECTED zone, not the browser's, so past-day greying and the
+  // today marker follow the zone picker. Recomputed when the zone changes.
+  let today, maxDate;
+  function setToday() {
+    today = BookingLogic.todayInZone(TZ);
+    maxDate = MAX_DAYS > 0 ? new Date(today.getTime() + MAX_DAYS * 86400000) : null;
+  }
+  setToday();
 
   let navYear = today.getFullYear(), navMonth = today.getMonth();
   let pickedDate = null, slotsCache = [], pickedSlot = null;
@@ -937,6 +943,7 @@ body {
 
   $('tz-select').addEventListener('change', async e => {
     TZ = e.target.value;
+    setToday();
     resizeTzSelect();
     await loadMonthAvailability(navYear, navMonth); // rebuild the day cache for the new tz
     if (pickedDate) {

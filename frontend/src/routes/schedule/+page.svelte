@@ -26,7 +26,7 @@
 		type UnavailableBlock
 	} from '$lib/api';
 	import { currentUser } from '$lib/stores';
-	import { resolveZone, zoneItems, zoneLabel, zoneOffset } from '$lib/timezones';
+	import { offsetChange, resolveZone, zoneItems, zoneLabel, zoneOffset } from '$lib/timezones';
 	import { Button, buttonVariants } from '$lib/components/ui/button';
 	import { Checkbox } from '$lib/components/ui/checkbox';
 	import { Combobox } from '$lib/components/ui/combobox';
@@ -80,7 +80,10 @@
 	const weekStart = $currentUser?.week_start ?? 1;
 	const dateFormat = $currentUser?.date_format ?? 'dmy';
 
-	const DATE_PATTERN = dateFormat === 'mdy' ? 'LL/dd/yyyy' : dateFormat === 'ymd' ? 'yyyy-LL-dd' : 'dd/LL/yyyy';
+	// Dates on this page spell the month out ("Thu 12 Nov 2026"). The date-time inputs are
+	// drawn by the browser in its own locale (e.g. 11/12/2026), so a numeric date beside them
+	// in the profile's order (12/11/2026) read as a different day.
+	const DATE_PATTERN = dateFormat === 'mdy' ? 'LLL d, yyyy' : dateFormat === 'ymd' ? 'yyyy-LL-dd' : 'd LLL yyyy';
 	const TIME_PATTERN = hour12 ? 'h:mm a' : 'HH:mm';
 	const INPUT_PATTERN = "yyyy-LL-dd'T'HH:mm"; // <input type="datetime-local"> value
 
@@ -129,10 +132,24 @@
 		}
 		return rows.map((r) => ({ who: r.who.join(' & '), zone: r.zone, when: fmtRange(s, e, r.zone), label: zoneLabel(r.zone, s) }));
 	}
+	/**
+	 * The dates the calendar shows (set by FullCalendar's datesSet). Zone offsets are taken
+	 * on these dates, not today: in March, today's offset is wrong for a week in April.
+	 */
+	let rangeStart = $state<DateTime>(DateTime.now());
+	let rangeEnd = $state<DateTime>(DateTime.now().plus({ days: 7 }));
+	const rangeChange = $derived(offsetChange(viewTz, rangeStart, rangeEnd));
+
 	/** The grid corner's two-line offset ("UTC" over "+03:30"); \A is a CSS line break. */
-	function cornerLabel(zone: string): string {
-		const off = zoneOffset(zone);
+	function cornerLabel(zone: string, at: DateTime): string {
+		const off = zoneOffset(zone, at);
 		return off === 'UTC' ? 'UTC' : `UTC\\A${off.slice(3)}`;
+	}
+	/** "Asia/Tehran (UTC+03:30)" for the shown dates, naming a DST change inside them. */
+	function rangeZoneLabel(zone: string): string {
+		const ch = zone === viewTz ? rangeChange : offsetChange(zone, rangeStart, rangeEnd);
+		const base = zoneLabel(zone, rangeStart);
+		return ch ? `${base.replace(/\)$/, '')}; ${ch.offset} from ${ch.at.toFormat(`ccc ${DATE_PATTERN}`)})` : base;
 	}
 	/** Who the calendar's zone stands for in those rows. */
 	const viewerWho = $derived(viewTz === profileTz ? 'You' : 'Schedule view');
@@ -320,6 +337,13 @@
 		calendar?.refetchEvents();
 	}
 
+	/** A day header from FullCalendar's wall-clock date fields (already in the view zone). */
+	function dayHeader(d: { year: number; month: number; day: number }, weekday: string): string {
+		const dt = DateTime.fromObject({ year: d.year, month: d.month + 1, day: d.day });
+		const md = dateFormat === 'mdy' ? 'LLL d' : dateFormat === 'ymd' ? 'LL-dd' : 'd LLL';
+		return dt.toFormat(`${weekday} ${md}`);
+	}
+
 	onMount(() => {
 		let destroyed = false;
 		(async () => {
@@ -356,6 +380,16 @@
 				slotDuration: '00:30:00',
 				slotLabelFormat: fcTimeFormat,
 				eventTimeFormat: fcTimeFormat,
+				// Day headers spell the month ("Mon 9 Nov"); FullCalendar's default "Mon 11/9"
+				// is month/day, which contradicts a day/month profile.
+				views: {
+					timeGridWeek: { dayHeaderFormat: (a) => dayHeader(a.date, 'ccc') },
+					timeGridDay: { dayHeaderFormat: (a) => dayHeader(a.date, 'cccc') }
+				},
+				datesSet: (arg) => {
+					rangeStart = fromFc(arg.startStr);
+					rangeEnd = fromFc(arg.endStr);
+				},
 				dayMaxEvents: true,
 				stickyHeaderDates: true,
 				selectable: true,
@@ -401,8 +435,29 @@
 	function conflictLabel(c: Conflict): string {
 		return CONFLICT_LABELS[c.kind] ?? c.kind.replace(/_/g, ' ');
 	}
+	/**
+	 * What to add after the label: the server's detail unless it only repeats the label
+	 * ("during an unavailable block — during an unavailable block"), plus the overlapped
+	 * appointment's time in the zone the calendar is drawn in (the server sends an instant).
+	 */
+	function conflictDetail(c: Conflict): string {
+		const label = conflictLabel(c).toLowerCase();
+		let d = c.detail ?? '';
+		// Drop the label when the detail starts by repeating it ("outside working hours —
+		// outside working hours (…)"), keeping whatever it adds.
+		if (d.toLowerCase().startsWith(label)) d = d.slice(label.length).trim();
+		if (c.at) {
+			const t = DateTime.fromISO(c.at).setZone(viewTz);
+			if (t.isValid) d = `${d || 'at'}${d ? ' at' : ''} ${t.toFormat(`ccc ${DATE_PATTERN}, ${TIME_PATTERN}`)}`;
+		}
+		return d;
+	}
+	/** Can't be saved even with force: past, same start, or a host the caller doesn't manage. */
+	function isBlockingConflict(c: Conflict): boolean {
+		return BLOCKING_KINDS.has(c.kind) || !!c.blocking;
+	}
 	function isBlocking(list: Conflict[] | null): boolean {
-		return !!list && list.some((c) => BLOCKING_KINDS.has(c.kind));
+		return !!list && list.some(isBlockingConflict);
 	}
 
 	// ---------------------------------------------------------------------------------
@@ -451,11 +506,15 @@
 		if (cMode === 'appointment') parties.push({ who: 'Attendees', zone: cTz });
 		parties.push({ who: viewerWho, zone: viewTz });
 		if (cHost) parties.push({ who: cHost.self ? 'You' : cHost.name, zone: cHost.timezone });
+		// Co-hosts are booked too, so their local time belongs here as well.
+		if (cMode === 'appointment') for (const co of cEventType?.co_hosts ?? []) parties.push({ who: co.name, zone: co.timezone });
 		return zoneRows(s, e, parties);
 	});
 
 	/** The appointment's start, for zone offsets: the offset on that date, not today's (DST). */
 	const cAt = $derived(fromInput(cStart, cTz || viewTz) ?? DateTime.now());
+	/** The end's own offset: an appointment can end on the other side of a DST change. */
+	const cEndAt = $derived(fromInput(cEnd, cTz || viewTz) ?? cAt);
 
 	/** Re-express start and end in a new zone, keeping the instants. */
 	function setCreateZone(z: string) {
@@ -499,8 +558,10 @@
 	function pickHost(id: string) {
 		cHostId = id;
 		const h = hosts.find((x) => x.id === id);
-		cEventTypeId = h?.event_types[0]?.id ?? '';
-		const et = h?.event_types[0];
+		// Default to an event type that books this host alone: defaulting to one shared with
+		// co-hosts silently booked them as well.
+		const et = h?.event_types.find((e) => (e.co_hosts ?? []).length === 0) ?? h?.event_types[0];
+		cEventTypeId = et?.id ?? '';
 		cConference = et && isOnlineMeeting(et.location_type) ? et.location_type : '';
 		cSync = !!h?.has_calendar;
 		applyDefaultEnd();
@@ -640,6 +701,20 @@
 	let moveTitle = $state('');
 	let pendingMove: { info: MoveInfo; send: (force: boolean) => Promise<unknown> } | null = null;
 
+	/**
+	 * A dragged or resized appointment waiting for the user to confirm it. Moving one
+	 * emails the attendees and updates calendar invites, so a slip of the mouse must not
+	 * do that on its own. Blocks move straight away: nobody is told about them.
+	 */
+	let dragConfirm = $state<{
+		info: MoveInfo;
+		send: (force: boolean) => Promise<unknown>;
+		title: string;
+		from: string;
+		to: string;
+		who: string;
+	} | null>(null);
+
 	async function onEventChange(info: MoveInfo) {
 		const p = info.event.extendedProps as ItemProps;
 		if (p.kind === 'busy' || !info.event.start || !info.event.end) { info.revert(); return; }
@@ -651,6 +726,35 @@
 			p.kind === 'booking'
 				? api.patch(`/v1/staff/bookings/${p.booking.id}`, force ? { ...body, force: true } : body)
 				: api.patch(`/v1/unavailable-blocks/${p.block.id}`, force ? { ...body, force: true } : body);
+		if (p.kind === 'booking') {
+			const b = p.booking;
+			const guests = (b.guest_list ?? b.guests ?? []).length;
+			dragConfirm = {
+				info,
+				send,
+				title: b.event_type_name,
+				from: fmtRange(b.start_at, b.end_at),
+				to: fmtRange(fromFc(info.event.startStr), fromFc(info.event.endStr)),
+				who: (b.attendee_name || b.attendee_email || 'The attendee') + (guests > 0 ? ` and ${guests} guest${guests === 1 ? '' : 's'}` : '')
+			};
+			return;
+		}
+		await sendMove(info, send, 'block');
+	}
+
+	function cancelDrag() {
+		dragConfirm?.info.revert();
+		dragConfirm = null;
+	}
+
+	async function confirmDrag() {
+		const d = dragConfirm;
+		dragConfirm = null;
+		if (d) await sendMove(d.info, d.send, 'booking');
+	}
+
+	async function sendMove(info: MoveInfo, send: (force: boolean) => Promise<unknown>, kind: 'booking' | 'block') {
+		const p = { kind };
 		try {
 			await send(false);
 			toast.success(p.kind === 'booking' ? 'Appointment moved' : 'Block updated');
@@ -805,7 +909,9 @@
 			refetch();
 		} catch (e: any) {
 			const c = conflictsOf(e);
-			bError = c ? c.map((x) => `${x.host_name}: ${conflictLabel(x)}`).join('; ') : e?.message || 'Could not save';
+			bError = c
+				? c.map((x) => `${x.host_name ? `${x.host_name}: ` : ''}${conflictLabel(x)}${conflictDetail(x) ? ` — ${conflictDetail(x)}` : ''}`).join('; ')
+				: e?.message || 'Could not save';
 		} finally {
 			bBusy = false;
 		}
@@ -911,39 +1017,41 @@
 
 <svelte:head><title>Schedule — Calnode</title></svelte:head>
 
-<div class="mb-6 flex flex-wrap items-start justify-between gap-4">
-	<div>
+<!-- The controls have fixed widths and their own slot, so nothing on this page moves when
+     you pick a zone or hosts. The text block takes the rest of the row and wraps inside
+     itself; the controls drop below it only when the window is too narrow for both, which
+     depends on the window, not on what they say. -->
+<div class="mb-6 flex flex-wrap items-start gap-x-6 gap-y-3">
+	<div class="min-w-0 flex-1 basis-80">
 		<h1 class="text-2xl font-semibold tracking-tight">Schedule</h1>
 		<p class="mt-1 text-sm text-muted-foreground">
 			Drag across a time to book an appointment or block it off. Drag an appointment to move it.
 		</p>
 		<p class="mt-1 text-sm">
-			All times on this calendar are in <span class="font-medium">{zoneLabel(viewTz)}</span>{#if viewTz !== profileTz}<span class="text-muted-foreground">, not your profile zone ({zoneLabel(profileTz)})</span>{/if}.
+			All times on this calendar are in <span class="font-medium">{rangeZoneLabel(viewTz)}</span>{#if viewTz !== profileTz}<span class="text-muted-foreground">, not your profile zone ({rangeZoneLabel(profileTz)})</span>.
+				<Button variant="link" size="sm" class="h-auto p-0 align-baseline" onclick={() => setViewTz(profileTz)}>Use my zone</Button>{:else}.{/if}
 		</p>
 	</div>
-	<div class="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:shrink-0">
-		<div class="flex w-full items-center gap-1.5 sm:w-auto" title="Time zone the calendar is shown in">
+	<div class="flex flex-wrap items-center gap-2">
+		<div class="flex items-center gap-1.5" title="Time zone the calendar is shown in">
 			<GlobeIcon class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
 			<span class="sr-only">Time zone</span>
 			<Combobox
-				class="min-w-0 flex-1 sm:w-64 sm:flex-none"
+				class="w-64"
 				items={ZONE_ITEMS}
 				bind:value={() => viewTz, setViewTz}
 				searchPlaceholder="Search by city, region or offset…"
 			/>
 		</div>
-		{#if viewTz !== profileTz}
-			<Button variant="ghost" size="sm" onclick={() => setViewTz(profileTz)}>Use my zone</Button>
-		{/if}
 		{#if multiHost}
 			<Popover.Root>
-				<Popover.Trigger class={buttonVariants({ variant: 'outline', size: 'sm' })} aria-label="Choose hosts">
-					<span class="flex -space-x-1">
+				<Popover.Trigger class="{buttonVariants({ variant: 'outline', size: 'sm' })} w-40 justify-start" aria-label="Choose hosts" title={selectionLabel}>
+					<span class="flex shrink-0 -space-x-1">
 						{#each selectedHostIds.slice(0, 4) as id (id)}
 							<span class="h-2.5 w-2.5 rounded-full ring-2 ring-background" style="background:{hostColor(id)}"></span>
 						{/each}
 					</span>
-					{selectionLabel}
+					<span class="min-w-0 truncate">{selectionLabel}</span>
 				</Popover.Trigger>
 				<Popover.Content align="end" class="w-64 p-2">
 					<div class="mb-1 flex items-center justify-between px-2 py-1">
@@ -1010,7 +1118,7 @@
 {#if loadingHosts}
 	<p class="py-8 text-sm text-muted-foreground">Loading…</p>
 {/if}
-<div class="schedule-cal" class:hidden={loadingHosts || !!hostsError} style="--cn-tz-corner: '{cornerLabel(viewTz)}'">
+<div class="schedule-cal" class:hidden={loadingHosts || !!hostsError} style="--cn-tz-corner: '{cornerLabel(viewTz, rangeStart)}'">
 	<div bind:this={calendarEl} class="h-full"></div>
 </div>
 
@@ -1046,7 +1154,7 @@
 						onchange={(e) => { const prev = cStart; cStart = e.currentTarget.value; onStartChange(prev); }} />
 				</div>
 				<div class="space-y-1.5">
-					<Label for="c-end">End <span class="font-normal text-muted-foreground">({zoneOffset(cTz || viewTz, cAt)})</span></Label>
+					<Label for="c-end">End <span class="font-normal text-muted-foreground">({zoneOffset(cTz || viewTz, cEndAt)})</span></Label>
 					<Input id="c-end" type="datetime-local" value={cEnd}
 						onchange={(e) => { cEnd = e.currentTarget.value; cEndManual = true; }} />
 				</div>
@@ -1086,10 +1194,17 @@
 							</Select.Trigger>
 							<Select.Content>
 								{#each cHost?.event_types ?? [] as et (et.id)}
-									<Select.Item value={et.id} label={et.name}>{et.name} · {et.duration_minutes} min</Select.Item>
+									<Select.Item value={et.id} label={et.name}>
+										{et.name} · {et.duration_minutes} min{#if (et.co_hosts ?? []).length > 0}<span class="text-muted-foreground">{' '}· with {et.co_hosts.map((c) => c.name).join(', ')}</span>{/if}
+									</Select.Item>
 								{/each}
 							</Select.Content>
 						</Select.Root>
+						{#if (cEventType?.co_hosts ?? []).length > 0}
+							<p class="text-xs text-muted-foreground">
+								Also books {cEventType!.co_hosts.map((c) => c.name).join(', ')}: this event type has more than one host.
+							</p>
+						{/if}
 					</div>
 				{/if}
 
@@ -1162,8 +1277,8 @@
 				<ul class="mt-1 list-disc space-y-0.5 pl-5">
 					{#each cConflicts as c}
 						<li>
-							<span class:font-semibold={BLOCKING_KINDS.has(c.kind)}>{c.host_name}: {conflictLabel(c)}</span>
-							{#if c.detail}<span class="opacity-75"> — {c.detail}</span>{/if}
+							<span class:font-semibold={isBlockingConflict(c)}>{c.host_name ? `${c.host_name}: ` : ''}{conflictLabel(c)}</span>
+							{#if conflictDetail(c)}<span class="opacity-75"> — {conflictDetail(c)}</span>{/if}
 						</li>
 					{/each}
 				</ul>
@@ -1186,6 +1301,27 @@
 	</Dialog.Content>
 </Dialog.Root>
 
+<!-- Confirm a dragged or resized appointment before anyone is emailed -->
+<Dialog.Root open={!!dragConfirm} onOpenChange={(o) => { if (!o && dragConfirm) cancelDrag(); }}>
+	<Dialog.Content class="max-w-md">
+		{#if dragConfirm}
+			<Dialog.Header>
+				<Dialog.Title>Move this appointment?</Dialog.Title>
+				<Dialog.Description>{dragConfirm.title}</Dialog.Description>
+			</Dialog.Header>
+			<dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-sm">
+				<dt class="text-muted-foreground">From</dt><dd>{dragConfirm.from}</dd>
+				<dt class="text-muted-foreground">To</dt><dd class="font-medium">{dragConfirm.to}</dd>
+			</dl>
+			<p class="text-sm text-muted-foreground">{dragConfirm.who} will be emailed the new time, and calendar invites are updated.</p>
+			<Dialog.Footer class="gap-2">
+				<Button variant="outline" onclick={cancelDrag}>Keep it</Button>
+				<Button onclick={confirmDrag}>Move</Button>
+			</Dialog.Footer>
+		{/if}
+	</Dialog.Content>
+</Dialog.Root>
+
 <!-- Move / resize conflict confirmation -->
 <Dialog.Root bind:open={moveOpen} onOpenChange={(o) => { if (!o && pendingMove) closeMove(true); }}>
 	<Dialog.Content class="max-w-md">
@@ -1196,8 +1332,8 @@
 		</Dialog.Header>
 		<ul class="list-disc space-y-0.5 pl-5 text-sm">
 			{#each moveConflicts as c}
-				<li class={BLOCKING_KINDS.has(c.kind) ? 'font-medium text-destructive' : ''}>
-					{c.host_name}: {conflictLabel(c)}{#if c.detail}<span class="text-muted-foreground"> — {c.detail}</span>{/if}
+				<li class={isBlockingConflict(c) ? 'font-medium text-destructive' : ''}>
+					{c.host_name ? `${c.host_name}: ` : ''}{conflictLabel(c)}{#if conflictDetail(c)}<span class="text-muted-foreground"> — {conflictDetail(c)}</span>{/if}
 				</li>
 			{/each}
 		</ul>
@@ -1328,12 +1464,13 @@
 </Dialog.Root>
 
 {#snippet zoneTable(rows: ZoneRow[])}
-	<dl class="grid gap-1.5 rounded-md border bg-muted/40 px-3 py-2 text-xs">
+	<!-- One two-column grid for all rows: as separate wrapping rows, each broke onto two lines
+	     or not depending on its own text, so the times didn't line up. Who/zone on the left,
+	     the time on the right; on a narrow screen the time goes under its label. -->
+	<dl class="grid grid-cols-1 gap-x-4 gap-y-1.5 rounded-md border bg-muted/40 px-3 py-2 text-xs sm:grid-cols-[minmax(0,1fr)_auto]">
 		{#each rows as r (r.zone)}
-			<div class="flex flex-wrap items-baseline justify-between gap-x-3">
-				<dt class="text-muted-foreground"><span class="font-medium text-foreground">{r.who}</span> · {r.label}</dt>
-				<dd class="font-medium tabular-nums">{r.when}</dd>
-			</div>
+			<dt class="min-w-0 text-muted-foreground"><span class="font-medium text-foreground">{r.who}</span> · {r.label}</dt>
+			<dd class="font-medium whitespace-nowrap tabular-nums sm:text-right">{r.when}</dd>
 		{/each}
 	</dl>
 {/snippet}
@@ -1383,9 +1520,24 @@
 		font-size: 0.8125rem;
 		color: var(--foreground);
 	}
+	/* The title takes the middle and never wraps: when a long title ("Nov 30 – Dec 6, 2026")
+	   wrapped the right-hand buttons onto a new line, the toolbar grew and the grid jumped. */
 	.schedule-cal :global(.fc .fc-toolbar) {
-		flex-wrap: wrap;
 		gap: 0.5rem;
+	}
+	.schedule-cal :global(.fc .fc-toolbar-chunk:nth-child(2)) {
+		flex: 1 1 0;
+		min-width: 0;
+		text-align: center;
+	}
+	.schedule-cal :global(.fc .fc-toolbar-title) {
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	/* Month view: a gap between the time and the name ("9:30a MohammadHadi", not "9:30aMohammadHadi"). */
+	.schedule-cal :global(.fc .fc-daygrid-event .fc-event-time) {
+		margin-right: 0.3rem;
 	}
 	.schedule-cal :global(.fc .fc-toolbar.fc-header-toolbar) {
 		margin-bottom: 0.75rem;
@@ -1484,6 +1636,7 @@
 		.schedule-cal :global(.fc .fc-toolbar-chunk) {
 			display: flex;
 			justify-content: center;
+			flex: none;
 		}
 	}
 </style>

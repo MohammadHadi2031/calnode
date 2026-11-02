@@ -11,6 +11,15 @@ test('dateKeyFromISO uses the SELECTED tz, not the host/browser tz', () => {
   assert.equal(B.dateKeyFromISO(iso, 'UTC'), '2026-06-15');
 });
 
+test('todayInZone is the selected tz calendar day, not the browser day', () => {
+  // 04:30 UTC on 3 Nov: already the 3rd in Tehran, still the 2nd in Los Angeles.
+  const now = new Date('2026-11-03T04:30:00Z');
+  assert.equal(B.ymd(B.todayInZone('Asia/Tehran', now)), '2026-11-03');
+  assert.equal(B.ymd(B.todayInZone('America/Los_Angeles', now)), '2026-11-02');
+  const d = B.todayInZone('UTC', now);
+  assert.equal(d.getHours(), 0); // local midnight, comparable with the grid's day cells
+});
+
 test('groupSlotsByDay buckets by tz-correct day and can exclude one slot', () => {
   const slots = [
     { start: '2026-06-15T02:00:00Z' }, // NY → 06-14
