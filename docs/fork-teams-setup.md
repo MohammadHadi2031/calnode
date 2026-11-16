@@ -27,6 +27,13 @@ calendar**, next to their Google one.
 An earlier attempt pointed at a different Microsoft organization that had no license, so it
 could not create meetings. It was replaced, not repaired.
 
+**Who can connect.** The app is single-tenant, so only accounts in the company's Microsoft 365
+organization can connect. Microsoft also only lets licensed work accounts create Teams
+meetings. A host's Gmail or personal Outlook account will never work. The options considered
+were: (A) a licensed account per host, (B) one shared account, and (C) a multi-tenant app for
+hosts who already have work accounts elsewhere. **B was chosen**, for cost. Switching a host to A
+later needs no code: give them their own licensed user, and they connect that instead.
+
 ## 1. License (admin.cloud.microsoft)
 
 Users → Active users → the appointments account → Licenses and apps. Both **Exchange Online**
@@ -108,3 +115,52 @@ Book from a private window with an outside address (e.g. Gmail). Then check that
 - the confirmation email has a `teams.microsoft.com` join link;
 - the event is on the shared account's Outlook calendar, with host and booker invited;
 - both the host and the booker get straight into the meeting, without waiting in the lobby.
+
+## Troubleshooting
+
+Each of these was hit during the first setup (2026-11-16).
+
+**"Selected user account does not exist in tenant … and cannot access the application …"**
+The account picked on Microsoft's screen is not in the organization. Usually it's a cached
+personal account, or an account from the old organization. Use a private window and choose
+"Use another account". Type the full `…@<tenant>.onmicrosoft.com` address, not an
+`@wisegridenergy.com` one. Hosts keep logging in to Calnode with Google. The Microsoft account is
+only connected from **Calendar**, never through "Sign in with Microsoft" on the login page.
+
+**The booking has an Outlook event but no Teams link, and nothing in the log.** Microsoft
+accepted the event and silently dropped the Teams meeting, because the account can't create one
+(yet). Calnode did its part: the booking's `booking_hosts.external_provider` is `microsoft` with
+an event ID, and `bookings.location_value` is empty. Confirm by scheduling a meeting by hand at
+teams.microsoft.com as the same account. If that fails too, it's on Microsoft's side, not Calnode's.
+Another sign: Outlook on the web has no Teams meeting toggle on a new event. For a definite
+answer, run this in Graph Explorer as that account:
+`GET https://graph.microsoft.com/v1.0/me/calendar?$select=allowedOnlineMeetingProviders`.
+`teamsForBusiness` must be listed.
+
+Causes, most likely first:
+
+1. **Still provisioning.** A newly licensed user can sign in to Teams but can't schedule for up
+   to ~24 hours. Teams just says "Something went wrong".
+2. **Meeting policy** (Teams admin center → Meetings → Meeting policies → Global): *Private
+   meetings scheduling*, *Outlook add-in* and *Channel meetings scheduling* must be On. Also, under
+   Teams apps → Permission policies, Microsoft apps (Calendar in particular) must be allowed.
+3. **Teams upgrade mode** (Users → Manage users → the account): must be *Teams only*.
+4. **A "(no Teams)" license.** Since 2024 many Microsoft 365 plans are sold without Teams. Check
+   Billing → Your products for the exact name. Teams then needs a separate *Microsoft Teams
+   Enterprise* license.
+
+Still failing after 24 hours with all of the above correct: open a ticket in the Microsoft 365
+admin center → Help & support.
+
+**Teams says the account doesn't exist.** Usually it's the wrong Teams: the built-in Windows
+"Microsoft Teams (free)" app and `teams.live.com` only take personal accounts. Use
+`https://teams.microsoft.com`. If that also refuses, see causes 1 and 4 above. Teams admin
+center → Users → Manage users only lists the account once Teams has provisioned it.
+
+## Status
+
+2026-11-16: Calnode side verified. The tenant, client ID and secret were checked against
+Microsoft from the server, and a test booking wrote the event to the shared calendar through
+the Microsoft connection. Teams links are blocked on Microsoft's side: the shared account cannot
+schedule a Teams meeting even by hand in Teams ("Something went wrong"). Next: once Teams
+can schedule by hand, make a fresh test booking and confirm the link appears.
