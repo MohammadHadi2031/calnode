@@ -17,6 +17,10 @@ host's organization's **default Teams lobby policy**. Calnode does not change it
 The default can differ if your Microsoft administrator changed the tenant's meeting policy.
 Check Teams admin center → Meetings → Meeting policies → "Who can bypass the lobby".
 
+**Production sets it to "Everyone"** (2026-11-16), because there every meeting is organized by
+one shared account and every host joins from Google, so nobody inside the organization is
+present to admit anyone. See `docs/fork-teams-setup.md`.
+
 ## What hosts should do
 
 - **Join early.** A host who is already in the meeting admits the lead as soon as they arrive. Every internal host can do this, not only the organizer.
