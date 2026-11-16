@@ -12,6 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/clientcredentials"
+
 	"github.com/calnode/calnode/internal/calendar"
 )
 
@@ -205,5 +208,50 @@ func TestWorkspaceCheck(t *testing.T) {
 				t.Errorf("call = %s %s; Check must only read", c.method, c.path)
 			}
 		})
+	}
+}
+
+// A token's permissions are fixed when it is issued. Test must not reuse one fetched
+// before the admin granted the permission, but ordinary calls must reuse the cached one.
+func TestWorkspaceCheck_fetchesAFreshToken(t *testing.T) {
+	var mu sync.Mutex
+	fetches := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/token" {
+			mu.Lock()
+			fetches++
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"access_token":"t","token_type":"Bearer","expires_in":3600}`)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		_, _ = io.WriteString(w, `{"allowedOnlineMeetingProviders":["teamsForBusiness"]}`)
+	}))
+	defer srv.Close()
+
+	cc := &clientcredentials.Config{ClientID: "id", ClientSecret: "s", TokenURL: srv.URL + "/token"}
+	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, srv.Client())
+	tokens := newRefreshableSource(ctx, cc)
+	ws := &Workspace{db: newTestDB(t), hc: tokenClient(tokens, srv.Client().Transport), tokens: tokens, apiBase: srv.URL}
+	count := func() int { mu.Lock(); defer mu.Unlock(); return fetches }
+
+	_ = ws.CancelEvent(context.Background(), "h", "mb@x.test", "e1")
+	_ = ws.CancelEvent(context.Background(), "h", "mb@x.test", "e2")
+	if n := count(); n != 1 {
+		t.Fatalf("token fetches after two calls = %d; want 1 (cached)", n)
+	}
+	if got := ws.Check(context.Background(), "mb@x.test"); !got.OK {
+		t.Fatalf("Check = %+v", got)
+	}
+	if n := count(); n != 2 {
+		t.Fatalf("token fetches after Check = %d; want a fresh one", n)
+	}
+	_ = ws.CancelEvent(context.Background(), "h", "mb@x.test", "e3")
+	if n := count(); n != 2 {
+		t.Errorf("token fetches after Check + call = %d; the call should reuse Check's token", n)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -42,7 +43,45 @@ const WorkspaceName = "microsoft_workspace"
 type Workspace struct {
 	db      *sql.DB
 	hc      *http.Client
+	tokens  *refreshableSource // nil in tests that inject hc directly
 	apiBase string
+}
+
+// refreshableSource is a cached client-credentials token source that can be told to drop
+// its token. The cache matters: a token is good for about an hour, and fetching one per
+// Graph call would double every request. But a token's permissions are fixed when it is
+// issued, so one fetched before an admin granted Calendars.ReadWrite keeps failing for
+// that whole hour - which is exactly when the admin presses Test. Check refreshes it.
+type refreshableSource struct {
+	mu  sync.Mutex
+	ctx context.Context
+	cfg *clientcredentials.Config
+	src oauth2.TokenSource
+}
+
+func newRefreshableSource(ctx context.Context, cfg *clientcredentials.Config) *refreshableSource {
+	return &refreshableSource{ctx: ctx, cfg: cfg, src: cfg.TokenSource(ctx)}
+}
+
+// tokenClient is an HTTP client authorized by tokens. Not oauth2.NewClient: that wraps the
+// source in a cache of its own, which would hold on to the token Refresh just dropped.
+func tokenClient(tokens *refreshableSource, base http.RoundTripper) *http.Client {
+	return &http.Client{Transport: &oauth2.Transport{Source: tokens, Base: base}}
+}
+
+// Token returns the cached token, fetching one when it is missing or expired.
+func (r *refreshableSource) Token() (*oauth2.Token, error) {
+	r.mu.Lock()
+	src := r.src
+	r.mu.Unlock()
+	return src.Token()
+}
+
+// Refresh drops the cached token, so the next call fetches one with current permissions.
+func (r *refreshableSource) Refresh() {
+	r.mu.Lock()
+	r.src = r.cfg.TokenSource(r.ctx)
+	r.mu.Unlock()
 }
 
 var (
@@ -77,9 +116,10 @@ func NewWorkspace(db *sql.DB, clientID, clientSecret, tenant string) (*Workspace
 	// Bounded on both legs: the token fetch (the context's client) and the Graph calls.
 	base := &http.Client{Timeout: 20 * time.Second}
 	ctx := context.WithValue(context.Background(), oauth2.HTTPClient, base)
-	hc := oauth2.NewClient(ctx, cc.TokenSource(ctx))
+	tokens := newRefreshableSource(ctx, cc)
+	hc := tokenClient(tokens, base.Transport)
 	hc.Timeout = 30 * time.Second
-	return &Workspace{db: db, hc: hc, apiBase: "https://graph.microsoft.com/v1.0"}, nil
+	return &Workspace{db: db, hc: hc, tokens: tokens, apiBase: "https://graph.microsoft.com/v1.0"}, nil
 }
 
 // Mailbox is the configured workspace mailbox, "" when the owner has not set one.
@@ -243,7 +283,13 @@ type WorkspaceCheck struct {
 // app a token, that the app may read the mailbox's calendar, and that the calendar lists
 // teamsForBusiness among its allowed meeting providers. The last part is exactly what
 // fails when Graph accepts an event but silently drops its Teams meeting.
+//
+// It always starts from a fresh token (see refreshableSource): Test is what an admin
+// presses right after changing permissions, and bookings then use that token too.
 func (w *Workspace) Check(ctx context.Context, mailbox string) WorkspaceCheck {
+	if w.tokens != nil {
+		w.tokens.Refresh()
+	}
 	u := w.mailboxRoot(mailbox) + "/calendar?$select=allowedOnlineMeetingProviders"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
