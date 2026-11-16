@@ -153,6 +153,49 @@ type Service struct {
 	db        *sql.DB
 	providers map[string]Provider
 	primary   string // default provider for new connections (first registered)
+	// workspace organizes Teams meetings for hosts without a Microsoft work account of
+	// their own (wisegrid fork). Kept out of providers on purpose: it must never be
+	// offered as a connect option, polled for free/busy, or become a destination.
+	workspace WorkspaceMeetings
+}
+
+// WorkspaceMeetings is an instance-wide Teams organizer: one Microsoft 365 mailbox,
+// configured by an admin, that creates the Teams meeting for any host who cannot
+// (wisegrid fork; see microsoft.Workspace). Mailbox is "" until it is configured.
+type WorkspaceMeetings interface {
+	Provider
+	Mailbox(ctx context.Context) (string, error)
+}
+
+// SetWorkspace installs the workspace Teams organizer (nil removes it).
+func (s *Service) SetWorkspace(w WorkspaceMeetings) { s.workspace = w }
+
+// Workspace returns the workspace Teams organizer, or nil when this instance has none.
+func (s *Service) Workspace() WorkspaceMeetings { return s.workspace }
+
+// workspaceMailbox is the configured workspace mailbox, "" when there is none (a lookup
+// error counts as none: the caller falls back to the host's own accounts or a manual link).
+func (s *Service) workspaceMailbox(ctx context.Context) string {
+	if s.workspace == nil {
+		return ""
+	}
+	mb, err := s.workspace.Mailbox(ctx)
+	if err != nil {
+		return ""
+	}
+	return mb
+}
+
+// byName resolves a provider name, including the workspace organizer's, which routes
+// the events it wrote back to it. nil for an unknown name.
+func (s *Service) byName(name string) Provider {
+	if p := s.providers[name]; p != nil {
+		return p
+	}
+	if s.workspace != nil && name == s.workspace.Name() {
+		return s.workspace
+	}
+	return nil
 }
 
 // NewService returns an empty Service. Register one provider per configured backend.
@@ -226,7 +269,8 @@ func (s *Service) CanAutoGenerate(ctx context.Context, userID, locType string) (
 		`SELECT provider, COALESCE(account_kind, '') FROM calendar_connections WHERE user_id = ? AND is_destination = 1 LIMIT 1`,
 		userID).Scan(&provider, &kind)
 	if err == sql.ErrNoRows {
-		return false, nil
+		// The workspace account mints Teams for a host with no calendar at all.
+		return locType == "teams" && s.workspaceMailbox(ctx) != "", nil
 	}
 	if err != nil {
 		return false, err
@@ -235,7 +279,7 @@ func (s *Service) CanAutoGenerate(ctx context.Context, userID, locType string) (
 	case "google_meet":
 		return provider == "google", nil
 	case "teams":
-		return provider == "microsoft" && kind != "personal", nil
+		return (provider == "microsoft" && kind != "personal") || s.workspaceMailbox(ctx) != "", nil
 	default:
 		return false, nil
 	}
@@ -472,7 +516,7 @@ func (s *Service) CreateEvent(ctx context.Context, userID string, p CreateEventP
 // to recognition and destination rather than stranding the event.
 func (s *Service) providerForEvent(ctx context.Context, userID, eventID, storedProvider string) Provider {
 	if storedProvider != "" {
-		if pr := s.providers[storedProvider]; pr != nil {
+		if pr := s.byName(storedProvider); pr != nil {
 			return pr
 		}
 	}
@@ -547,7 +591,7 @@ func (s *Service) EventInvite(ctx context.Context, userID, calendarID, eventID, 
 // writes, so they reach any attendee's calendar on that provider without an .ics: it emails
 // them itself, or it is a QuietInviter. False for an unknown name.
 func (s *Service) ProviderPlacesGuests(name string) bool {
-	p := s.providers[name]
+	p := s.byName(name)
 	if p == nil {
 		return false
 	}
@@ -570,7 +614,21 @@ func (s *Service) CancelEvent(ctx context.Context, userID, calendarID, eventID, 
 // meetings) - preferring the destination account. "" when none can, or for any other
 // location type. Unlike CanAutoGenerate this looks past the destination: a host who
 // writes bookings to Outlook but also connected Google can still mint a Meet link.
+//
+// For teams, a host with no work account of their own falls back to the workspace
+// organizer (microsoft.WorkspaceName) when one is configured. A host's own connection to
+// the workspace mailbox itself does not count as their own: that is the old per-host way
+// of sharing it, and the workspace path does the same job without that host's token.
 func (s *Service) MeetingProvider(ctx context.Context, userID, locType string) (string, error) {
+	prov, err := s.ownMeetingProvider(ctx, userID, locType)
+	if err != nil || prov != "" || locType != "teams" || s.workspaceMailbox(ctx) == "" {
+		return prov, err
+	}
+	return s.workspace.Name(), nil
+}
+
+// ownMeetingProvider is MeetingProvider without the workspace fallback.
+func (s *Service) ownMeetingProvider(ctx context.Context, userID, locType string) (string, error) {
 	var want string
 	switch locType {
 	case "google_meet":
@@ -584,11 +642,16 @@ func (s *Service) MeetingProvider(ctx context.Context, userID, locType string) (
 		return "", nil
 	}
 	q := `SELECT 1 FROM calendar_connections WHERE user_id = ? AND provider = ?`
+	args := []any{userID, want}
 	if want == "microsoft" {
 		q += ` AND COALESCE(account_kind, '') != 'personal'`
+		if mb := s.workspaceMailbox(ctx); mb != "" {
+			q += ` AND LOWER(COALESCE(account_email, '')) != LOWER(?)`
+			args = append(args, mb)
+		}
 	}
 	var one int
-	switch err := s.db.QueryRowContext(ctx, q+` LIMIT 1`, userID, want).Scan(&one); err {
+	switch err := s.db.QueryRowContext(ctx, q+` LIMIT 1`, args...).Scan(&one); err {
 	case nil:
 		return want, nil
 	case sql.ErrNoRows:
@@ -604,7 +667,7 @@ func (s *Service) MeetingProvider(ctx context.Context, userID, locType string) (
 // CreateEvent. Use it where the provider matters more than the destination: minting a
 // Meet or Teams link.
 func (s *Service) CreateEventVia(ctx context.Context, userID, provider string, p CreateEventParams) (string, string, string, string, error) {
-	pr := s.providers[provider]
+	pr := s.byName(provider)
 	if pr == nil {
 		return s.CreateEvent(ctx, userID, p)
 	}
@@ -628,6 +691,6 @@ func (s *Service) DestinationProvider(ctx context.Context, userID string) string
 // ProviderInvitesGuests reports whether the named provider emails an event's guests
 // itself (false for an unknown name).
 func (s *Service) ProviderInvitesGuests(name string) bool {
-	p := s.providers[name]
+	p := s.byName(name)
 	return p != nil && p.InvitesGuests()
 }

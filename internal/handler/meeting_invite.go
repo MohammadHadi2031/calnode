@@ -97,16 +97,14 @@ func tooManyGuests(loc *i18n.Locale, max int) string {
 	return loc.Tf("err_too_many_guests", max)
 }
 
-// applyConferenceChoice applies the booker's Meet/Teams pick to an event type that offers it.
+// applyConferenceChoice applies the booker's platform pick to an event type that offers it.
 // ok=false means the request named a platform this event type does not offer. A switch
 // drops the event type's manual link: it was a link for the other platform.
 func applyConferenceChoice(et *bookableEventType, choice string, locValue *string) bool {
 	switch {
 	case choice == "" || choice == et.LocationType:
 		return true
-	case !et.AllowConferenceChoice,
-		et.LocationType != "google_meet" && et.LocationType != "teams",
-		choice != "google_meet" && choice != "teams":
+	case !offersConference(et.ConferenceOptions, et.LocationType, choice):
 		return false
 	}
 	et.LocationType = choice
@@ -190,6 +188,21 @@ func (h *Handler) sharedEventInvitees(ctx context.Context, gc *calendar.Service,
 		out = append(out, calendar.Invitee{Name: host.Name, Email: host.Email})
 	}
 	return out
+}
+
+// mintingHostInvitee is the meeting host as an attendee of the event minted through via,
+// when that event is not on the calendar they actually use: a Meet minted through a
+// non-destination Google account, or a Teams meeting organized by the workspace account.
+// Without it the host's own calendar never shows the meeting they are hosting. nil when
+// via is "" or is the host's destination provider (the event is already theirs).
+//
+// sharedEventInvitees applies the same rule to the shared event; this is the per-host
+// (Calnode-delivered invites) path and the reconciler's.
+func mintingHostInvitee(ctx context.Context, gc *calendar.Service, userID, name, email, via string) *calendar.Invitee {
+	if via == "" || email == "" || gc.DestinationProvider(ctx, userID) == via {
+		return nil
+	}
+	return &calendar.Invitee{Name: name, Email: email}
 }
 
 // providerInvited reports whether a booking's invites reached the booker (and guests)

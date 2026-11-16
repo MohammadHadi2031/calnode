@@ -186,8 +186,11 @@ type staffEventType struct {
 	Name                  string `json:"name"`
 	DurationMinutes       int    `json:"duration_minutes"`
 	LocationType          string `json:"location_type"`
-	AllowConferenceChoice bool   `json:"allow_conference_choice"`
-	RoutingMode           string `json:"routing_mode"`
+	AllowConferenceChoice bool   `json:"allow_conference_choice"` // len(ConferenceOptions) > 0
+	// ConferenceOptions are the platforms the booker may pick from, default included;
+	// empty when there is no choice (see effectiveConferenceOptions).
+	ConferenceOptions []string `json:"conference_options"`
+	RoutingMode       string   `json:"routing_mode"`
 	// CoHosts are the other required hosts: booking this event type for the host books
 	// them too. The Schedule dialog names them and shows their local time, and prefers
 	// an event type without co-hosts as its default.
@@ -219,7 +222,7 @@ func (h *Handler) ListStaffHosts(w http.ResponseWriter, r *http.Request) {
 	for _, m := range hosts {
 		ho := hostOut{managedHost: m, EventTypes: []staffEventType{}}
 		rows, err := h.db.QueryContext(r.Context(), `
-			SELECT et.id, et.slug, et.name, et.duration_minutes, et.location_type, et.allow_conference_choice, et.routing_mode
+			SELECT et.id, et.slug, et.name, et.duration_minutes, et.location_type, et.conference_options, et.routing_mode
 			FROM event_types et JOIN event_type_hosts eth ON eth.event_type_id = et.id
 			WHERE eth.user_id = ? AND et.is_active = 1 AND et.archived_at IS NULL
 			ORDER BY et.display_order, et.name COLLATE NOCASE`, m.ID)
@@ -230,12 +233,18 @@ func (h *Handler) ListStaffHosts(w http.ResponseWriter, r *http.Request) {
 		}
 		for rows.Next() {
 			e := staffEventType{CoHosts: []staffCoHost{}}
-			if err := rows.Scan(&e.ID, &e.Slug, &e.Name, &e.DurationMinutes, &e.LocationType, &e.AllowConferenceChoice, &e.RoutingMode); err != nil {
+			var confOpts string
+			if err := rows.Scan(&e.ID, &e.Slug, &e.Name, &e.DurationMinutes, &e.LocationType, &confOpts, &e.RoutingMode); err != nil {
 				rows.Close() // #nosec G104 -- already returning the scan error
 				h.logger.ErrorContext(r.Context(), "staff hosts: scan event type", "error", err)
 				h.writeError(w, http.StatusInternalServerError, "internal error")
 				return
 			}
+			e.ConferenceOptions = effectiveConferenceOptions(confOpts, e.LocationType)
+			if e.ConferenceOptions == nil {
+				e.ConferenceOptions = []string{}
+			}
+			e.AllowConferenceChoice = len(e.ConferenceOptions) > 0
 			ho.EventTypes = append(ho.EventTypes, e)
 		}
 		rows.Close() // #nosec G104 -- fully consumed
@@ -501,10 +510,10 @@ func (h *Handler) loadStaffEventType(ctx context.Context, id string) (*bookableE
 	var et bookableEventType
 	err := h.db.QueryRowContext(ctx, `
 		SELECT id, user_id, name, duration_minutes, location_type, location_value, routing_mode, rr_strategy,
-		       invite_delivery, max_guests, allow_conference_choice
+		       invite_delivery, max_guests, conference_options
 		FROM event_types WHERE id = ?`, id).
 		Scan(&et.ID, &et.UserID, &et.Name, &et.DurationMinutes, &et.LocationType, &et.LocationValue,
-			&et.RoutingMode, &et.RRStrategy, &et.InviteDelivery, &et.MaxGuests, &et.AllowConferenceChoice)
+			&et.RoutingMode, &et.RRStrategy, &et.InviteDelivery, &et.MaxGuests, &et.ConferenceOptions)
 	if err != nil {
 		return nil, "", errEventTypeNotFound
 	}

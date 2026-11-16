@@ -1,38 +1,50 @@
 # Setting up Microsoft Teams meetings (wisegrid fork)
 
 How the production instance (`https://appointments.wisegridenergy.com`) is set up to put
-Microsoft Teams links on bookings. No code is involved: Calnode already asks Microsoft Graph
-for a Teams meeting when it creates the calendar event (`internal/calendar/microsoft/events.go`,
-`isOnlineMeeting` + `teamsForBusiness`). Everything below is Microsoft-side configuration plus
-three environment variables.
+Microsoft Teams links on bookings: Microsoft-side configuration, three environment variables,
+and one setting in Calnode (Settings → Microsoft Teams).
 
 Set up 2026-11-16. Account names, tenant IDs and secrets are deliberately left out of this
 public repo; they are with the company's Microsoft administrator.
 
-## The model: one shared Microsoft account, hosts stay on Google
+## The model: one workspace Teams account, hosts stay on Google
 
 Every WiseGrid host's main calendar is Google. Teams needs a Microsoft **work** account
 with a mailbox, so the company has one shared appointments account in its own Microsoft 365
-organization. Each host who offers Teams connects that account in Calnode **as a second
-calendar**, next to their Google one.
+organization. An admin enters it once in **Settings → Microsoft Teams**. Hosts connect nothing.
 
-- `Service.MeetingProvider` (`internal/calendar/calendar.go`) looks past the host's
-  destination calendar: a Teams booking is created on the shared Microsoft calendar, a Meet
-  booking on the host's Google calendar.
-- The Microsoft event invites the host (their Google address) and the booker, so both get
-  the Teams link.
-- A new connection never takes over "Add bookings here" from an existing one
-  (`connstore.ResolveFlags`), so Google stays the destination.
+- Calnode reaches the mailbox **as the app itself** (OAuth client credentials,
+  `internal/calendar/microsoft/workspace.go`), never as a signed-in user. Nobody needs the
+  account's password or MFA device, and there is no user token to expire, be revoked by a
+  password change, or be disconnected by one host for everyone. The only credential is the
+  client secret, which every Microsoft feature already depends on.
+- For a Teams booking, `Service.MeetingProvider` (`internal/calendar/calendar.go`) uses a
+  host's **own** Microsoft work account if they connected one, and otherwise the workspace
+  account. Bookings it organizes are stamped `microsoft_workspace` with the mailbox as their
+  calendar id, so reschedules and cancels find them even after the setting changes.
+- The event lives on the shared mailbox and invites the booker and every host (their Google
+  addresses), so everyone gets the Teams link and it lands on each host's own calendar.
+- The workspace account is **never checked for conflicts** and is never anyone's "Add
+  bookings here" calendar. Two hosts can have Teams meetings at the same time: Microsoft does
+  not refuse overlapping events, and nobody blocks anybody's slots.
+- Reassigning a booking to another host swaps the hosts on the existing event instead of
+  deleting and recreating it, which would cancel the Teams meeting the booker already has.
 
-An earlier attempt pointed at a different Microsoft organization that had no license, so it
-could not create meetings. It was replaced, not repaired.
+**Limits of a shared organizer.** Hosts join as guests from outside the organization, so
+nobody in the meeting has organizer rights: no recording or transcription, and limited power
+to remove people or end the meeting for everyone. All meeting chats belong to the shared
+account. A host who needs those gets their own licensed account and connects it on the
+Calendar page; they then organize their own meetings and nothing else changes.
 
-**Who can connect.** The app is single-tenant, so only accounts in the company's Microsoft 365
-organization can connect. Microsoft also only lets licensed work accounts create Teams
-meetings. A host's Gmail or personal Outlook account will never work. The options considered
-were: (A) a licensed account per host, (B) one shared account, and (C) a multi-tenant app for
-hosts who already have work accounts elsewhere. **B was chosen**, for cost. Switching a host to A
-later needs no code: give them their own licensed user, and they connect that instead.
+**History.** Until Nov 2026 each host connected the shared account on their Calendar page and
+unticked its conflict check. That needed the password on every host's machine, and a forgotten
+untick silently cost a host slots. Those per-host connections are now ignored for Teams once
+the workspace account is set (`MeetingProvider` skips a connection to the workspace mailbox),
+and can simply be disconnected.
+
+**Who can be the workspace account.** The app is single-tenant, so it must be a user in the
+company's Microsoft 365 organization, licensed for Exchange Online and Teams. `MICROSOFT_TENANT`
+must name that organization (not `common`), since client credentials are issued by one tenant.
 
 ## 1. License (admin.cloud.microsoft)
 
@@ -48,7 +60,12 @@ create calendar events (or the Teams meeting on them) without one.
   - `https://appointments.wisegridenergy.com/v1/auth/microsoft/callback` (Sign in with Microsoft)
 - Certificates & secrets → new client secret, 24 months. Copy the **Value**, not the Secret ID.
 - API permissions → Microsoft Graph → **Delegated**: `Calendars.ReadWrite`, `User.Read`,
-  `offline_access`, `openid`, `profile`, `email` → **Grant admin consent**.
+  `offline_access`, `openid`, `profile`, `email` (hosts with their own account, and Sign in
+  with Microsoft).
+- API permissions → Microsoft Graph → **Application**: `Calendars.ReadWrite` (the workspace
+  account) → **Grant admin consent**.
+- Recommended: limit the application permission to the appointments mailbox with Exchange
+  **RBAC for Applications**. Without it, it covers every mailbox in the organization.
 
 **Secret expiry:** the secret expires 24 months after it was created. When it does, Teams
 links stop being created and hosts get "reconnect needed". Create a new secret, update `.env`,
@@ -92,21 +109,23 @@ token request against the same tenant confirms the client ID and secret together
 can only be confirmed by a real sign-in: Microsoft answers every unauthenticated request with
 50058 before it looks at the redirect URI.
 
-## 5. Each host (Calnode admin → Calendar)
+## 5. Workspace Teams account (Calnode admin → Settings → Microsoft Teams)
 
-1. **Connect Microsoft 365 (Outlook)** and sign in as the shared account.
-2. Leave **Add bookings here** on the Google calendar.
-3. On the Microsoft connection → **Manage calendars** → **untick Check** on its calendar, and save.
+Enter the appointments account's address, **Save**, then **Test**. Test only reads: it asks
+Microsoft for a token, reads the mailbox's calendar, and checks that `teamsForBusiness` is
+among its allowed meeting providers, which is the condition behind "event but no Teams link"
+below. Each failure says what to fix (secret, permission, mailbox, license). Saving does not
+require Test to pass: until it does, bookings fall back to a host's own account or the event
+type's fixed link.
 
-Step 3 matters when more than one host shares the account. Otherwise every Teams booking on the
-shared calendar shows as busy for *all* of them, and they block each other's slots. A fully
-unticked account is skipped by free/busy entirely (`freeBusyConnections`), so an expired
-Microsoft token also can't break those hosts' availability.
+Hosts who connected the shared account on their Calendar page before this existed can
+disconnect it. It is no longer used for Teams.
 
 ## 6. Event types
 
-Set Location to **Microsoft Teams**, or keep Google Meet and tick **Let the booker choose Google
-Meet or Microsoft Teams**.
+Set Location to **Microsoft Teams**. To let the booker choose, tick the other platforms under
+**Booker can also choose** (Google Meet, Zoom, and for Meet/Teams a phone call). The location
+is preselected. Only platforms Calnode can create a link for can be newly ticked.
 
 ## 7. Test
 
@@ -114,6 +133,7 @@ Book from a private window with an outside address (e.g. Gmail). Then check that
 
 - the confirmation email has a `teams.microsoft.com` join link;
 - the event is on the shared account's Outlook calendar, with host and booker invited;
+- on the server, the booking's `booking_hosts.external_provider` is `microsoft_workspace`;
 - both the host and the booker get straight into the meeting, without waiting in the lobby.
 
 ## Troubleshooting
@@ -129,7 +149,7 @@ only connected from **Calendar**, never through "Sign in with Microsoft" on the 
 
 **The booking has an Outlook event but no Teams link, and nothing in the log.** Microsoft
 accepted the event and silently dropped the Teams meeting, because the account can't create one
-(yet). Calnode did its part: the booking's `booking_hosts.external_provider` is `microsoft` with
+(yet). Settings → Microsoft Teams → **Test** reports exactly this ("not ready for Teams yet"). Calnode did its part: the booking's `booking_hosts.external_provider` is `microsoft` with
 an event ID, and `bookings.location_value` is empty. Confirm by scheduling a meeting by hand at
 teams.microsoft.com as the same account. If that fails too, it's on Microsoft's side, not Calnode's.
 Another sign: Outlook on the web has no Teams meeting toggle on a new event. For a definite
@@ -164,3 +184,7 @@ Microsoft from the server, and a test booking wrote the event to the shared cale
 the Microsoft connection. Teams links are blocked on Microsoft's side: the shared account cannot
 schedule a Teams meeting even by hand in Teams ("Something went wrong"). Next: once Teams
 can schedule by hand, make a fresh test booking and confirm the link appears.
+
+Later 2026-11-16: the workspace Teams account replaced per-host connections (code). To roll
+out: add the Application `Calendars.ReadWrite` permission + admin consent (§2), deploy, enter
+the account in Settings → Microsoft Teams (§5), press Test, then make a test booking (§7).

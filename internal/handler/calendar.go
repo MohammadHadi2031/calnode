@@ -228,6 +228,12 @@ func (h *Handler) CalendarStatus(w http.ResponseWriter, r *http.Request) {
 	if destProvider != "" {
 		resp["provider"] = destProvider
 	}
+	// The workspace Teams account (fork) mints Teams for this user without a connection.
+	if ws := svc.Workspace(); ws != nil {
+		if mb, err := ws.Mailbox(r.Context()); err == nil && mb != "" {
+			resp["teams_workspace"] = mb
+		}
+	}
 	h.writeJSON(w, http.StatusOK, resp)
 }
 

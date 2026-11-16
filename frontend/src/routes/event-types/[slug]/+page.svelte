@@ -10,7 +10,6 @@
 	import { Label } from '$lib/components/ui/label';
 	import { Checkbox } from '$lib/components/ui/checkbox';
 	import { Textarea } from '$lib/components/ui/textarea';
-	import { Switch } from '$lib/components/ui/switch';
 	import * as Select from '$lib/components/ui/select';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import { toast } from 'svelte-sonner';
@@ -74,6 +73,13 @@
 	// Which connected provider can natively mint each online platform's link.
 	const PLATFORM_PROVIDER: Record<string, string> = { google_meet: 'google', teams: 'microsoft' };
 	const isOnlineMeeting = (t: string) => t === 'google_meet' || t === 'teams';
+	// Video platforms a booker may choose between (the server's conferencePlatforms).
+	const CONFERENCE_PLATFORMS = [
+		{ value: 'google_meet', label: 'Google Meet' },
+		{ value: 'teams', label: 'Microsoft Teams' },
+		{ value: 'zoom', label: 'Zoom' },
+	];
+	const isConferencePlatform = (t: string) => CONFERENCE_PLATFORMS.some((p) => p.value === t);
 
 	let form = $state({
 		display_order: 0,
@@ -81,7 +87,7 @@
 		is_active: true, is_public: true, show_taken_slots: false,
 		invite_delivery: 'calendar' as EventType['invite_delivery'],
 		invite_timezone: 'attendee' as EventType['invite_timezone'],
-		max_guests: 10, allow_conference_choice: false,
+		max_guests: 10, conference_options: [] as string[],
 		location_type: 'link', location_value: '',
 		buffer_before_minutes: 0, buffer_after_minutes: 0,
 		min_notice_minutes: 0, max_future_days: 60,
@@ -92,12 +98,38 @@
 	// Price is edited in major units (e.g. dollars); stored as integer cents.
 	let priceMajor = $state('0');
 
-	// True when the connected calendar will auto-generate the chosen platform's link.
+	// True when the connected calendar will auto-generate the chosen platform's link. For
+	// Teams the workspace Teams account (Settings → Microsoft Teams) counts too.
+	const teamsByWorkspace = $derived(form.location_type === 'teams' && !!calStatus?.teams_workspace);
 	const meetAutoGen = $derived(
-		isOnlineMeeting(form.location_type) &&
+		teamsByWorkspace ||
+		(isOnlineMeeting(form.location_type) &&
 			!!calStatus?.connected &&
-			calStatus?.provider === PLATFORM_PROVIDER[form.location_type]
+			calStatus?.provider === PLATFORM_PROVIDER[form.location_type])
 	);
+
+	// Whether a booking can get a p meeting minted, by the same rule the server checks when
+	// an option is added: Meet/Teams from any connected account (not only the destination),
+	// Teams also from the workspace account, Zoom from a connected Zoom account.
+	function canMint(p: string): boolean {
+		const conns = calStatus?.connections ?? [];
+		if (p === 'google_meet') return conns.some((c) => c.provider === 'google');
+		if (p === 'teams') return !!calStatus?.teams_workspace || conns.some((c) => c.provider === 'microsoft');
+		if (p === 'zoom') return !!zoomStatus?.connected;
+		return false;
+	}
+	const MINT_HINT: Record<string, string> = {
+		google_meet: 'Connect a Google calendar on the Calendar page to offer it.',
+		teams: 'Set up Settings → Microsoft Teams, or connect a Microsoft work account, to offer it.',
+		zoom: 'Connect Zoom on the Calendar page to offer it.',
+	};
+	// The options stored when the editor loaded: an option already offered stays tickable
+	// even if its account has gone, matching the server's validate-on-change rule.
+	let loadedConfOptions = $state<string[]>([]);
+	function toggleConfOption(p: string, on: boolean) {
+		const rest = form.conference_options.filter((x) => x !== p);
+		form.conference_options = on ? [...rest, p] : rest;
+	}
 
 	// True when the owner's connected Zoom account will auto-mint a meeting per booking.
 	const zoomAutoGen = $derived(form.location_type === 'zoom' && !!zoomStatus?.connected);
@@ -306,7 +338,7 @@
 				invite_delivery: et.invite_delivery ?? 'calendar',
 				invite_timezone: et.invite_timezone ?? 'attendee',
 				max_guests: et.max_guests ?? 10,
-				allow_conference_choice: et.allow_conference_choice ?? false,
+				conference_options: et.conference_options ?? [],
 				location_type: et.location_type,
 				location_value: et.location_value ?? '',
 				buffer_before_minutes: et.buffer_before_minutes,
@@ -317,6 +349,7 @@
 				price_cents: et.price_cents ?? 0,
 				currency: et.currency ?? 'usd',
 			};
+			loadedConfOptions = et.conference_options ?? [];
 			priceMajor = ((et.price_cents ?? 0) / 100).toFixed(2);
 			reminders = et.reminders ?? [];
 			if (et.routing_mode === 'round_robin') { hostScope = 'people'; staffing = 'rotate'; }
@@ -375,7 +408,8 @@
 				invite_delivery: form.invite_delivery,
 				invite_timezone: form.invite_timezone,
 				max_guests: Number(form.max_guests),
-				allow_conference_choice: form.allow_conference_choice,
+				// Only the alternatives; the location type itself is always offered.
+				conference_options: form.conference_options.filter((p) => p !== form.location_type),
 				allow_phone_call: allowPhoneCall,
 				location_type: form.location_type,
 				location_value: form.location_value.trim() || null,
@@ -680,9 +714,6 @@
 			</p>
 		</div>
 
-		{#if isOnlineMeeting(form.location_type)}
-			<label class="flex items-center gap-3 text-sm"><input type="checkbox" bind:checked={allowPhoneCall} />Let invitees choose a phone call by entering their number</label>
-		{/if}
 		<!-- Location -->
 		<div class="mt-6 border-t pt-5">
 			<p class="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">Location</p>
@@ -706,7 +737,11 @@
 						<Label for="et-loc-val">{platform} link</Label>
 						{#if meetAutoGen}
 							<p class="rounded-md border border-green-600/20 bg-green-50 px-3 py-2 text-sm text-green-700">
-								A {platform} link is generated automatically for each booking from your connected calendar.{#if form.location_type === 'teams'} Personal Microsoft accounts can't generate Teams links — add one below as a fallback.{/if}
+								{#if teamsByWorkspace}
+									A Teams link is generated automatically for each booking by the workspace Teams account ({calStatus?.teams_workspace}). A host who connected their own Microsoft work account uses that instead.
+								{:else}
+									A {platform} link is generated automatically for each booking from your connected calendar.{#if form.location_type === 'teams'} Personal Microsoft accounts can't generate Teams links — add one below as a fallback.{/if}
+								{/if}
 							</p>
 						{:else}
 							<p class="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
@@ -743,18 +778,40 @@
 					{/if}
 				</div>
 			</div>
-			{#if isOnlineMeeting(form.location_type)}
-				<!-- Only meaningful for a Meet/Teams type; the public pages ignore the stored
-				     flag on any other location, so it is hidden rather than disabled there. -->
-				<div class="mt-4 flex items-center justify-between gap-4 rounded-md border bg-muted/30 px-3 py-2">
+			{#if isConferencePlatform(form.location_type) || isOnlineMeeting(form.location_type)}
+				<!-- What else the booker may pick instead of the location above. Only shown for a
+				     video platform: the public pages ignore stored options on any other location. -->
+				<div class="mt-4 space-y-2.5 rounded-md border bg-muted/30 px-3 py-3">
 					<div>
-						<Label for="et-conf-choice" class="text-sm">Let the booker choose Google Meet or Microsoft Teams</Label>
+						<p class="text-sm font-medium">Booker can also choose</p>
 						<p class="text-xs text-muted-foreground">
-							The booking form offers both, starting on {form.location_type === 'teams' ? 'Microsoft Teams' : 'Google Meet'}.
-							The link comes from the first assigned host whose connected calendar can create the chosen platform.
+							Ticked options appear on the booking form, with {LOCATION_TYPES.find((lt) => lt.value === form.location_type)?.label} preselected.
+							Each booking gets a link for the platform the booker picked.
 						</p>
 					</div>
-					<Switch id="et-conf-choice" bind:checked={form.allow_conference_choice} />
+					{#each CONFERENCE_PLATFORMS.filter((p) => p.value !== form.location_type) as p (p.value)}
+						{@const checked = form.conference_options.includes(p.value)}
+						{@const available = canMint(p.value) || loadedConfOptions.includes(p.value)}
+						<div class="flex items-start gap-2.5">
+							<Checkbox id="et-conf-{p.value}" {checked} disabled={!checked && !available}
+								onCheckedChange={(v) => toggleConfOption(p.value, v === true)} />
+							<div class="-mt-0.5">
+								<Label for="et-conf-{p.value}" class="text-sm font-normal {!checked && !available ? 'text-muted-foreground' : ''}">{p.label}</Label>
+								{#if !canMint(p.value)}
+									<p class="text-xs text-muted-foreground">{MINT_HINT[p.value]}</p>
+								{/if}
+							</div>
+						</div>
+					{/each}
+					{#if isOnlineMeeting(form.location_type)}
+						<div class="flex items-start gap-2.5">
+							<Checkbox id="et-phone-choice" bind:checked={allowPhoneCall} />
+							<div class="-mt-0.5">
+								<Label for="et-phone-choice" class="text-sm font-normal">Phone call</Label>
+								<p class="text-xs text-muted-foreground">The booker enters their number and the host calls them.</p>
+							</div>
+						</div>
+					{/if}
 				</div>
 			{/if}
 		</div>

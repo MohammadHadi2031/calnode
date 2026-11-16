@@ -97,6 +97,8 @@ func platformLabel(locType string) string {
 		return "Microsoft Teams"
 	case "google_meet":
 		return "Google Meet"
+	case "zoom":
+		return "Zoom"
 	default:
 		return locType
 	}
@@ -188,7 +190,7 @@ func (h *Handler) validateLocation(ctx context.Context, ownerID, locType string,
 			}
 		}
 		if locType == "teams" {
-			return fmt.Errorf("connect a Microsoft 365 work account to auto-generate Teams links, or enter a Teams link")
+			return fmt.Errorf("set up the workspace Teams account in Settings → Microsoft Teams, connect a Microsoft 365 work account, or enter a Teams link")
 		}
 		return fmt.Errorf("connect a Google calendar to auto-generate Meet links, or enter a Google Meet link")
 	case "zoom":
@@ -525,9 +527,10 @@ type bookableEventType struct {
 	// InviteDelivery is who sends the booker's invite (booking.InviteByCalendar/ByCalnode),
 	// copied onto each booking at creation.
 	InviteDelivery string
-	// Fork (migration 90001): guest cap and whether the booker may pick Meet or Teams.
-	MaxGuests             int
-	AllowConferenceChoice bool
+	// Fork (migration 90001): guest cap. ConferenceOptions (migration 90006) is the stored
+	// list of platforms offered beside LocationType; see effectiveConferenceOptions.
+	MaxGuests         int
+	ConferenceOptions string
 }
 
 // loadBookableEventType loads an event type by slug for the booking-creation/slot paths.
@@ -543,13 +546,13 @@ func (h *Handler) loadBookableEventType(ctx context.Context, slug string) (*book
 		       location_type, location_value, allow_phone_call, routing_mode, rr_strategy,
 		       buffer_before_minutes, buffer_after_minutes, min_notice_minutes, max_future_days,
 		       is_active, is_public, show_taken_slots, max_active_bookings, price_cents, currency,
-		       invite_delivery, max_guests, allow_conference_choice
+		       invite_delivery, max_guests, conference_options
 		FROM event_types WHERE slug = ?`, slug).
 		Scan(&et.ID, &et.UserID, &et.Name, &et.DurationMinutes, &et.SlotIntervalMinutes,
 			&et.LocationType, &et.LocationValue, &et.AllowPhoneCall, &et.RoutingMode, &et.RRStrategy,
 			&et.BufferBeforeMinutes, &et.BufferAfterMinutes, &et.MinNoticeMinutes, &et.MaxFutureDays,
 			&isActive, &isPublic, &showTaken, &et.MaxActiveBookings, &et.PriceCents, &et.Currency,
-			&et.InviteDelivery, &et.MaxGuests, &et.AllowConferenceChoice)
+			&et.InviteDelivery, &et.MaxGuests, &et.ConferenceOptions)
 	if err != nil || isActive == 0 || isPublic == 0 {
 		return nil, errEventTypeNotFound
 	}
@@ -774,8 +777,8 @@ func (h *Handler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 		Honeypot string `json:"hp_extra"`
 		// Guests are additional invitee emails (fork; capped by event_types.max_guests).
 		Guests []string `json:"guests"`
-		// Conference is the booker's pick of "google_meet" or "teams", honoured when the
-		// event type offers the choice (allow_conference_choice).
+		// Conference is the booker's pick of video platform ("google_meet", "teams",
+		// "zoom"), honoured when the event type offers it (conference_options).
 		Conference string `json:"conference"`
 		Answers    []struct {
 			QuestionID string `json:"question_id"`
@@ -1402,7 +1405,11 @@ func (h *Handler) createHostEvents(ctx context.Context, b *booking.Booking, in b
 		}
 		providerInvites = gc.ProviderInvitesGuests(prov)
 	}
-	write(first, via, params(hostEventLocation(meetURL, livekitHostURL, bData.LocationValue), invitee, guestList, mintFirst))
+	firstGuests := guestList
+	if inv := mintingHostInvitee(ctx, gc, first.UserID, first.Name, first.Email, via); inv != nil {
+		firstGuests = append(append([]calendar.Invitee(nil), guestList...), *inv)
+	}
+	write(first, via, params(hostEventLocation(meetURL, livekitHostURL, bData.LocationValue), invitee, firstGuests, mintFirst))
 	location := hostEventLocation(meetURL, livekitHostURL, bData.LocationValue)
 	var wg sync.WaitGroup
 	for _, host := range ordered[1:] {

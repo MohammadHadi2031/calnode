@@ -232,6 +232,20 @@ because there is no request field to blame an error on - so every branch of
 `smartDefaultLocation` has to return a type the owner can actually host at. It used to end
 at an unconditional `"zoom"`.
 
+## Teams via the workspace account, and the booker's platform choice (fork)
+
+- **Workspace Teams account** (`internal/calendar/microsoft/workspace.go`): one M365 mailbox,
+  set in Settings → Microsoft Teams, organizes Teams meetings for every host without their own
+  Microsoft work account. App-only (client credentials), never a user token. It lives in
+  `calendar.Service.workspace`, **not** in `providers`: it must never be a connect option, a
+  free/busy source or a destination. Its events are stamped `microsoft_workspace` with the
+  mailbox as calendar id. Setup + rationale: `docs/fork-teams-setup.md`.
+- **`conference_options`** (migration 90006) lists the platforms offered beside the location
+  type (`google_meet`/`teams`/`zoom`); `effectiveConferenceOptions` is the one rule for what
+  the booker sees. Labels are composed in Go and sent to book.html/embed.js finished.
+  `allow_conference_choice` is derived/kept in step, not read. Adding an option validates on
+  change only (`validateConferenceOptions`).
+
 ## Conventions
 
 - `pnpm` (not npm). Use `pnpm exec <tool>` for local binaries.

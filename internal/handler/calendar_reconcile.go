@@ -260,6 +260,13 @@ func (h *Handler) reconcileCreations(ctx context.Context, gc *calendar.Service) 
 			invitees = h.sharedEventInvitees(ctx, gc, guests, hosts, m.userID, via)
 		default:
 			invitees, _ = guestInvitees(guests)
+			if via != "" {
+				var name, email string
+				_ = h.db.QueryRowContext(ctx, `SELECT name, email FROM users WHERE id = ?`, m.userID).Scan(&name, &email)
+				if inv := mintingHostInvitee(ctx, gc, m.userID, name, email, via); inv != nil {
+					invitees = append(invitees, *inv)
+				}
+			}
 		}
 		loc := i18n.Get(m.orgLocale) // nil (→ English) if empty/unrecognized; i18n.Locale.T handles nil safely
 		params := calendar.CreateEventParams{

@@ -608,6 +608,7 @@ func TestDuplicateEventType_handlesEveryEventTypeColumn(t *testing.T) {
 		// Fork (migration 90001).
 		"max_guests":              true,
 		"allow_conference_choice": true,
+		"conference_options":      true,
 		"invite_timezone":         true,
 		"display_order":           true,
 	}

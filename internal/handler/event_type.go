@@ -48,15 +48,18 @@ type eventTypeJSON struct {
 	InviteDelivery string `json:"invite_delivery"`
 	// Fork (migration 90001): additional guests the booker may add (0 = none), whether
 	// the booker may pick Meet or Teams, and the zone provider invites are written in.
-	MaxGuests             int     `json:"max_guests"`
-	AllowConferenceChoice bool    `json:"allow_conference_choice"`
-	InviteTimezone        string  `json:"invite_timezone"`
-	IsPublic              bool    `json:"is_public"`
-	CreatedAt             string  `json:"created_at"`
-	MsgConfirmation       *string `json:"msg_confirmation"`
-	MsgCancellation       *string `json:"msg_cancellation"`
-	MsgReschedule         *string `json:"msg_reschedule"`
-	MsgReminder           *string `json:"msg_reminder"`
+	MaxGuests             int    `json:"max_guests"`
+	AllowConferenceChoice bool   `json:"allow_conference_choice"` // derived: the booker is offered a choice
+	InviteTimezone        string `json:"invite_timezone"`
+	// ConferenceOptions (fork, migration 90006): the platforms offered to the booker beside
+	// LocationType, as stored. The booker sees them only when LocationType is a platform.
+	ConferenceOptions []string `json:"conference_options"`
+	IsPublic          bool     `json:"is_public"`
+	CreatedAt         string   `json:"created_at"`
+	MsgConfirmation   *string  `json:"msg_confirmation"`
+	MsgCancellation   *string  `json:"msg_cancellation"`
+	MsgReschedule     *string  `json:"msg_reschedule"`
+	MsgReminder       *string  `json:"msg_reminder"`
 	// MsgGreeting overrides the conversational assistant's opening line for this event
 	// type. Unlike the Msg* fields above, nil/empty means "no override" — the assistant
 	// falls back to the locale-keyed default greeting, not a fixed English seed.
@@ -100,6 +103,7 @@ func scanEventTypeRow(s rowScanner, trailing ...any) (*eventTypeJSON, error) {
 	var desc, locVal, msgConf, msgCancel, msgResched, msgRemind, msgGreeting sql.NullString
 	var subjConf, subjCancel, subjResched, subjRemind sql.NullString
 	var isActive, isPublic, showTaken int
+	var confOpts string
 
 	dests := []any{
 		&et.ID, &et.Slug, &et.Name, &desc,
@@ -112,7 +116,7 @@ func scanEventTypeRow(s rowScanner, trailing ...any) (*eventTypeJSON, error) {
 		&msgConf, &msgCancel, &msgResched, &msgRemind, &msgGreeting,
 		&subjConf, &subjCancel, &subjResched, &subjRemind,
 		&et.PriceCents, &et.Currency, &et.InviteDelivery, &et.DisplayOrder,
-		&et.MaxGuests, &et.AllowConferenceChoice, &et.InviteTimezone,
+		&et.MaxGuests, &et.AllowConferenceChoice, &et.InviteTimezone, &confOpts,
 	}
 	dests = append(dests, trailing...)
 	err := s.Scan(dests...)
@@ -128,6 +132,8 @@ func scanEventTypeRow(s rowScanner, trailing ...any) (*eventTypeJSON, error) {
 	if locVal.Valid {
 		et.LocationValue = &locVal.String
 	}
+	et.ConferenceOptions = parseConferenceOptions(confOpts)
+	et.AllowConferenceChoice = effectiveConferenceOptions(confOpts, et.LocationType) != nil
 	et.IsActive = isActive != 0
 	et.IsPublic = isPublic != 0
 	et.ShowTakenSlots = showTaken != 0
@@ -172,7 +178,7 @@ const etColumns = `id, slug, name, description,
 	msg_confirmation, msg_cancellation, msg_reschedule, msg_reminder, msg_greeting,
 	subj_confirmation, subj_cancellation, subj_reschedule, subj_reminder,
 	price_cents, currency, invite_delivery, display_order,
-	max_guests, allow_conference_choice, invite_timezone`
+	max_guests, allow_conference_choice, invite_timezone, conference_options`
 
 // selectETCols fetches a single owner-scoped event type (no `owned` column).
 const selectETCols = "SELECT " + etColumns + " FROM event_types"
@@ -319,6 +325,12 @@ func (h *Handler) CreateEventType(w http.ResponseWriter, r *http.Request) {
 	if msg := req.forkEventTypeFields.validate(); msg != "" {
 		h.writeError(w, http.StatusBadRequest, msg)
 		return
+	}
+	if opts := req.forkEventTypeFields.conferenceOptions(); opts != nil && conferencePlatform(locType) {
+		if err := h.validateConferenceOptions(r.Context(), user.ID, locType, nil, parseConferenceOptions(*opts)); err != nil {
+			h.writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	inviteDelivery := booking.InviteByCalendar
 	if req.InviteDelivery != nil {
@@ -730,10 +742,10 @@ func (h *Handler) PatchEventType(w http.ResponseWriter, r *http.Request) {
 
 	// Look up the event type ID + current location (needed for reminder upsert, to
 	// verify ownership, and to validate the effective online-meeting location below).
-	var etID, curLocType, curLocVal, curInviteDelivery string
+	var etID, curLocType, curLocVal, curInviteDelivery, curConfOpts string
 	if err := h.db.QueryRowContext(r.Context(),
-		`SELECT id, location_type, COALESCE(location_value, ''), invite_delivery FROM event_types WHERE slug = ? AND user_id = ?`, slug, user.ID).
-		Scan(&etID, &curLocType, &curLocVal, &curInviteDelivery); err != nil {
+		`SELECT id, location_type, COALESCE(location_value, ''), invite_delivery, conference_options FROM event_types WHERE slug = ? AND user_id = ?`, slug, user.ID).
+		Scan(&etID, &curLocType, &curLocVal, &curInviteDelivery, &curConfOpts); err != nil {
 		if err == sql.ErrNoRows {
 			h.writeError(w, http.StatusNotFound, "event type not found")
 			return
@@ -787,6 +799,26 @@ func (h *Handler) PatchEventType(w http.ResponseWriter, r *http.Request) {
 	if msg := req.forkEventTypeFields.validate(); msg != "" {
 		h.writeError(w, http.StatusBadRequest, msg)
 		return
+	}
+	// The booker's platform choices, on the same on-change rule: only a platform this
+	// patch newly offers must be mintable, so one whose account was disconnected since
+	// does not lock the operator out of the rest of the form. A location change counts,
+	// since it can bring stored options into effect.
+	newConfOpts := curConfOpts
+	if opts := req.forkEventTypeFields.conferenceOptions(); opts != nil {
+		newConfOpts = *opts
+	}
+	if (newConfOpts != curConfOpts || effLocType != curLocType) && conferencePlatform(effLocType) {
+		before := parseConferenceOptions(curConfOpts)
+		if conferencePlatform(curLocType) {
+			before = append(before, curLocType)
+		} else {
+			before = nil // nothing was offered: every option is new
+		}
+		if err := h.validateConferenceOptions(r.Context(), user.ID, effLocType, before, parseConferenceOptions(newConfOpts)); err != nil {
+			h.writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	req.forkEventTypeFields.each(set)
 

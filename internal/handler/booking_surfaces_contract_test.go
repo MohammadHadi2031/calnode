@@ -138,7 +138,8 @@ func TestCreationSurfacesShareGuestsAndConferenceHooks(t *testing.T) {
 	var bookBuf bytes.Buffer
 	// Rendered with both features on: the markup is conditional on them.
 	data := bookPageData{T: i18n.Default().T, MaxGuests: 3, GuestsHint: "hint",
-		ConferenceChoice: true, DefaultConference: "teams"}
+		ConferenceOptions: []conferenceOption{{"google_meet", "Google Meet"}, {"teams", "Microsoft Teams"}},
+		DefaultConference: "teams"}
 	if err := bookTmpl.Execute(&bookBuf, data); err != nil {
 		t.Fatalf("book render: %v", err)
 	}
@@ -151,8 +152,8 @@ func TestCreationSurfacesShareGuestsAndConferenceHooks(t *testing.T) {
 		"guests-field", "guest-list", "guest-chip", "guest-remove", "guest-add-row",
 		"guest-add-btn", "guest-error", "guests-hint",
 		"conference-field", "conference-options", "conference-option",
-		// POST /v1/bookings fields and the radio values
-		"guests:", "conference:", `"google_meet"`, `"teams"`,
+		// POST /v1/bookings fields
+		"guests:", "conference:",
 	}
 	for _, h := range hooks {
 		for name, src := range surfaces {
@@ -168,15 +169,21 @@ func TestCreationSurfacesShareGuestsAndConferenceHooks(t *testing.T) {
 	sources := map[string]string{"book.html": bookTmplSrc, "embed.js": string(embedJS)}
 	for _, key := range []string{"guests_label", "guests_placeholder", "guests_add", "guests_remove",
 		"guests_duplicate", "guests_self", "err_invalid_guest_email",
-		"conference_label", "conference_google_meet", "conference_teams"} {
+		"conference_label"} {
 		for name, src := range sources {
 			if !strings.Contains(src, key) {
 				t.Errorf("locale key %q not used by %s — the guests/conference copy has drifted", key, name)
 			}
 		}
 	}
+	// Platform radios are built from the server's conference_options (values + translated
+	// labels) on both surfaces, never from a hard-coded list, so a platform added there
+	// reaches both at once.
+	if !strings.Contains(bookTmplSrc, "range .ConferenceOptions") {
+		t.Error("book.html no longer renders the platform radios from .ConferenceOptions")
+	}
 	// The widget reads these from GET /public; book.go must keep sending them.
-	for _, field := range []string{"max_guests", "guests_hint", "allow_conference_choice", "default_conference"} {
+	for _, field := range []string{"max_guests", "guests_hint", "conference_options", "default_conference"} {
 		if !strings.Contains(string(embedJS), "info."+field) {
 			t.Errorf("embed.js no longer reads /public field %q", field)
 		}
@@ -185,7 +192,7 @@ func TestCreationSurfacesShareGuestsAndConferenceHooks(t *testing.T) {
 	for _, key := range []string{"guests_label", "guests_placeholder", "guests_add", "guests_remove",
 		"guests_hint", "guests_hint_one", "guests_duplicate", "guests_self",
 		"err_invalid_guest_email", "err_too_many_guests",
-		"conference_label", "conference_google_meet", "conference_teams"} {
+		"conference_label", "conference_google_meet", "conference_teams", "conference_zoom"} {
 		if en.T(key) == key {
 			t.Errorf("locale key %q is missing from en.json", key)
 		}

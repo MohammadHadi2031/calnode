@@ -694,16 +694,17 @@
         ]));
       }
 
-      // Conference choice — only when /public says so (already gated on a Meet/Teams
-      // location server-side); preselects the event type's own platform.
+      // Conference choice — the platforms /public offers (values + labels already
+      // translated server-side; empty = no picker), preselecting the event type's own.
       var confRadios = [];
-      if (this.info.allow_conference_choice) {
-        var defConf = this.info.default_conference === 'teams' ? 'teams' : 'google_meet';
-        var confOpts = [['google_meet', 'conference_google_meet'], ['teams', 'conference_teams']].map(function (o) {
-          var radio = el('input', { type: 'radio', name: 'conference', value: o[0] });
-          if (o[0] === defConf) radio.checked = true;
+      var confList = this.info.conference_options || [];
+      if (confList.length) {
+        var defConf = this.info.default_conference;
+        var confOpts = confList.map(function (o) {
+          var radio = el('input', { type: 'radio', name: 'conference', value: o.value });
+          if (o.value === defConf) radio.checked = true;
           confRadios.push(radio);
-          return el('label', { class: 'conference-option' }, [radio, el('span', { text: t(self.i18n, o[1]) })]);
+          return el('label', { class: 'conference-option' }, [radio, el('span', { text: o.label })]);
         });
         form.appendChild(el('fieldset', { class: 'field conference-field' }, [
           el('legend', { text: t(this.i18n, 'conference_label') }),

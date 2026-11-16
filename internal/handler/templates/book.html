@@ -220,12 +220,12 @@ body {
           <p id="guests-hint" class="hint guests-hint">{{.GuestsHint}}</p>
         </div>
         {{end}}
-        {{if .ConferenceChoice}}
+        {{if .ConferenceOptions}}
         <fieldset class="field conference-field">
           <legend>{{call .T "conference_label"}}</legend>
           <div class="conference-options">
-            <label class="conference-option"><input type="radio" name="conference" value="google_meet"{{if ne .DefaultConference "teams"}} checked{{end}}><span>{{call .T "conference_google_meet"}}</span></label>
-            <label class="conference-option"><input type="radio" name="conference" value="teams"{{if eq .DefaultConference "teams"}} checked{{end}}><span>{{call .T "conference_teams"}}</span></label>
+            {{range .ConferenceOptions}}<label class="conference-option"><input type="radio" name="conference" value="{{.Value}}"{{if eq .Value $.DefaultConference}} checked{{end}}><span>{{.Label}}</span></label>
+            {{end}}
           </div>
         </fieldset>
         {{end}}

@@ -182,5 +182,6 @@
   "guests_self": "Das ist Ihre eigene E-Mail-Adresse. Sie erhalten die Einladung ohnehin.",
   "conference_label": "Videokonferenz",
   "conference_google_meet": "Google Meet",
-  "conference_teams": "Microsoft Teams"
+  "conference_teams": "Microsoft Teams",
+  "conference_zoom": "Zoom"
 }

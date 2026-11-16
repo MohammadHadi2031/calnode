@@ -189,5 +189,6 @@
   "guests_self": "That's your own email address. You'll receive the invite anyway.",
   "conference_label": "Video conferencing",
   "conference_google_meet": "Google Meet",
-  "conference_teams": "Microsoft Teams"
+  "conference_teams": "Microsoft Teams",
+  "conference_zoom": "Zoom"
 }

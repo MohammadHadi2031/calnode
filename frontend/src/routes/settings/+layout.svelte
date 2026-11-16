@@ -13,6 +13,7 @@
 		{ section: 'Workspace', href: `${base}/settings/email`, label: 'Email', adminOnly: true },
 		{ section: 'Workspace', href: `${base}/settings/google`, label: 'Google OAuth', adminOnly: true },
 		{ section: 'Workspace', href: `${base}/settings/zoom`, label: 'Zoom', adminOnly: true },
+		{ section: 'Workspace', href: `${base}/settings/teams`, label: 'Microsoft Teams', adminOnly: true },
 		{ section: 'Workspace', href: `${base}/settings/video`, label: 'Video', adminOnly: true },
 		{ section: 'Workspace', href: `${base}/settings/storage`, label: 'Storage', adminOnly: true },
 		{ section: 'Workspace', href: `${base}/settings/payments`, label: 'Payments', adminOnly: true },

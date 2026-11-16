@@ -31,8 +31,11 @@ export type EventType = {
 	allow_phone_call: boolean;
 	/** Additional guest emails a booker may add (0..50; 0 = no guest field). */
 	max_guests: number;
-	/** Google Meet / Teams event types only: let the booker pick either platform. */
+	/** Derived: the booker is offered a choice of video platform. */
 	allow_conference_choice: boolean;
+	/** Video platforms offered beside location_type (google_meet | teams | zoom), as stored.
+	 *  Only in effect when location_type is itself one of them. */
+	conference_options: string[];
 	/** Time zone the provider calendar invite is written in. */
 	invite_timezone: 'attendee' | 'host' | 'utc';
 	id: string;
@@ -201,6 +204,7 @@ export type CalendarStatus = {
 	providers?: string[]; // configured providers available to connect
 	connections?: CalendarConnection[]; // all connected calendars (many checked, one destination)
 	unconfigured_providers?: string[]; // providers Calnode supports but this instance has no credentials for
+	teams_workspace?: string; // the workspace Teams mailbox, when an admin set one: Teams links need no connection
 };
 
 export type EmailSettings = {
@@ -241,6 +245,19 @@ export type ZoomSettings = {
 	configured: boolean;
 	/** Exact redirect URI to register in the Zoom Marketplace app. */
 	redirect_uri: string;
+};
+
+export type TeamsSettings = {
+	available: boolean; // this server can use a workspace Teams account at all
+	reason?: string;    // why not, when !available
+	mailbox: string;    // '' = not set
+};
+
+export type TeamsCheck = {
+	ok: boolean;
+	reachable: boolean;
+	providers: string[] | null;
+	message?: string;
 };
 
 export type ZoomStatus = {
@@ -354,6 +371,8 @@ export type StaffEventType = {
 	duration_minutes: number;
 	location_type: string;
 	allow_conference_choice: boolean;
+	/** The platforms the booker may pick from, default included; [] = no choice. */
+	conference_options: string[];
 	routing_mode: string;
 	/** The other required hosts: booking this event type for the host books them too. */
 	co_hosts: { id: string; name: string; timezone: string }[];

@@ -10,6 +10,7 @@ import (
 
 	"github.com/calnode/calnode/internal/booking"
 	"github.com/calnode/calnode/internal/calendar"
+	"github.com/calnode/calnode/internal/calendar/microsoft"
 	"github.com/calnode/calnode/internal/i18n"
 	"github.com/calnode/calnode/internal/mailer"
 	"github.com/calnode/calnode/internal/webhook"
@@ -164,6 +165,23 @@ func (h *Handler) ReassignBooking(w http.ResponseWriter, r *http.Request) {
 			// event's attendees is not supported); the new host gets an .ics below.
 			h.logger.Warn("reassign: moved seat was invited to a shared event; its attendee list is unchanged",
 				"booking_id", bCopy.ID, "old_host", oldHostID)
+		} else if ws := h.teamsWorkspace(); ws != nil && extProvider == microsoft.WorkspaceName && extEventID != "" {
+			// Fork: the workspace Teams account organizes this meeting, so it is on nobody's
+			// own calendar: swap the hosts on it and keep it. Recreating it would cancel the
+			// Teams meeting the booker already holds. The seat keeps the same event.
+			var oldEmail, newName, newEmail string
+			_ = h.db.QueryRowContext(ctx, `SELECT email FROM users WHERE id = ?`, oldHostID).Scan(&oldEmail)
+			_ = h.db.QueryRowContext(ctx, `SELECT name, email FROM users WHERE id = ?`, newHostID).Scan(&newName, &newEmail)
+			if err := ws.ReplaceAttendee(ctx, extCalendarID, extEventID, oldEmail,
+				calendar.Invitee{Name: newName, Email: newEmail}); err != nil {
+				h.logger.Error("reassign: swap host on workspace Teams event", "error", err, "booking_id", bCopy.ID)
+			}
+			if _, err := h.db.ExecContext(ctx,
+				`UPDATE booking_hosts SET external_event_id = ?, external_calendar_id = ?, external_provider = ?
+				 WHERE booking_id = ? AND is_primary = 1`,
+				extEventID, extCalendarID, extProvider, bCopy.ID); err != nil {
+				h.logger.Error("reassign: persist host event id", "error", err, "booking_id", bCopy.ID)
+			}
 		} else if gc := h.getCal(); gc != nil {
 			// A Google event the booker is on was never mailed by Google: their calendar
 			// entry carries its identity. The new event takes that identity over (newer

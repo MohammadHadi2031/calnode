@@ -182,5 +182,6 @@
   "guests_self": "Dat is je eigen e-mailadres. Je ontvangt de uitnodiging sowieso.",
   "conference_label": "Videovergaderen",
   "conference_google_meet": "Google Meet",
-  "conference_teams": "Microsoft Teams"
+  "conference_teams": "Microsoft Teams",
+  "conference_zoom": "Zoom"
 }

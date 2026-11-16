@@ -68,7 +68,30 @@ func (c *Client) CreateEvent(ctx context.Context, userID string, p calendar.Crea
 	if err != nil || hc == nil {
 		return "", "", "", err
 	}
+	// Default calendar unless the user picked a specific one inside the account. Update and
+	// cancel stay on /me/events/{id}, which Graph resolves across all of the user's
+	// calendars, so only creation needs to be calendar-scoped.
+	createURL := c.apiBase + "/me/events"
+	destCal := ""
+	if toDestination {
+		if destCal, err = c.destinationCalendarID(ctx, userID); err != nil {
+			return "", "", "", err
+		}
+	}
+	if destCal != "" {
+		createURL = c.apiBase + "/me/calendars/" + url.PathEscape(destCal) + "/events"
+	}
+	eventID, join, err := createGraphEvent(ctx, hc, createURL, p)
+	if err != nil {
+		return "", "", "", err
+	}
+	return eventID, join, destCal, nil
+}
 
+// eventRequest builds the Graph event body for p: the booker (OrganizerEmail) and every
+// guest as required attendees, deduplicated by address, and a Teams meeting when
+// p.AddMeet is set.
+func eventRequest(p calendar.CreateEventParams) graphEventReq {
 	reqBody := graphEventReq{
 		Subject: p.Summary,
 		Start:   graphDateTime{DateTime: p.Start.UTC().Format(graphTZ), TimeZone: "UTC"},
@@ -100,49 +123,40 @@ func (c *Client) CreateEvent(ctx context.Context, userID string, p calendar.Crea
 		reqBody.IsOnlineMeeting = true
 		reqBody.OnlineMeetingProvider = "teamsForBusiness"
 	}
+	return reqBody
+}
 
-	body, err := json.Marshal(reqBody)
+// createGraphEvent POSTs p as a new event to createURL (a mailbox's .../events
+// collection) and returns the event id and the Teams join URL, if Graph minted one.
+// Shared by the per-user Client (/me/...) and the Workspace (/users/{mailbox}/...).
+func createGraphEvent(ctx context.Context, hc *http.Client, createURL string, p calendar.CreateEventParams) (eventID, joinURL string, err error) {
+	body, err := json.Marshal(eventRequest(p))
 	if err != nil {
-		return "", "", "", fmt.Errorf("microsoft: create event marshal: %w", err)
+		return "", "", fmt.Errorf("microsoft: create event marshal: %w", err)
 	}
-	// Default calendar unless the user picked a specific one inside the account. Update and
-	// cancel stay on /me/events/{id}, which Graph resolves across all of the user's
-	// calendars, so only creation needs to be calendar-scoped.
-	createURL := c.apiBase + "/me/events"
-	destCal := ""
-	if toDestination {
-		if destCal, err = c.destinationCalendarID(ctx, userID); err != nil {
-			return "", "", "", err
-		}
-	}
-	if destCal != "" {
-		createURL = c.apiBase + "/me/calendars/" + url.PathEscape(destCal) + "/events"
-	}
-
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, createURL, bytes.NewReader(body))
 	if err != nil {
-		return "", "", "", fmt.Errorf("microsoft: create event request: %w", err)
+		return "", "", fmt.Errorf("microsoft: create event request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := hc.Do(req)
 	if err != nil {
-		return "", "", "", fmt.Errorf("microsoft: create event call: %w", err)
+		return "", "", fmt.Errorf("microsoft: create event call: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return "", "", "", fmt.Errorf("microsoft: create event status %d: %s", resp.StatusCode, graphErrBody(resp))
+		return "", "", fmt.Errorf("microsoft: create event status %d: %s", resp.StatusCode, graphErrBody(resp))
 	}
 
 	var evResp graphEventResp
 	if err := json.NewDecoder(resp.Body).Decode(&evResp); err != nil {
-		return "", "", "", fmt.Errorf("microsoft: create event decode: %w", err)
+		return "", "", fmt.Errorf("microsoft: create event decode: %w", err)
 	}
-	join := ""
 	if evResp.OnlineMeeting != nil {
-		join = evResp.OnlineMeeting.JoinURL
+		joinURL = evResp.OnlineMeeting.JoinURL
 	}
-	return evResp.ID, join, destCal, nil
+	return evResp.ID, joinURL, nil
 }
 
 // UpdateEvent moves an existing event to a new start/end (reschedule). Graph
@@ -159,7 +173,11 @@ func (c *Client) UpdateEvent(ctx context.Context, userID, calendarID, eventID st
 	if err != nil || hc == nil {
 		return err
 	}
+	return moveGraphEvent(ctx, hc, c.apiBase+"/me/events/"+url.PathEscape(eventID), start, end)
+}
 
+// moveGraphEvent PATCHes the event at eventURL to a new start/end.
+func moveGraphEvent(ctx context.Context, hc *http.Client, eventURL string, start, end time.Time) error {
 	body, err := json.Marshal(struct {
 		Start graphDateTime `json:"start"`
 		End   graphDateTime `json:"end"`
@@ -170,8 +188,7 @@ func (c *Client) UpdateEvent(ctx context.Context, userID, calendarID, eventID st
 	if err != nil {
 		return fmt.Errorf("microsoft: update event marshal: %w", err)
 	}
-	apiURL := c.apiBase + "/me/events/" + url.PathEscape(eventID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, apiURL, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, eventURL, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("microsoft: update event request: %w", err)
 	}
@@ -202,8 +219,14 @@ func (c *Client) AddAttendees(ctx context.Context, userID, calendarID, eventID s
 	if hc == nil {
 		return calendar.ErrCannotAddAttendees
 	}
-	eventURL := c.apiBase + "/me/events/" + url.PathEscape(eventID)
+	return patchGraphAttendees(ctx, hc, c.apiBase+"/me/events/"+url.PathEscape(eventID), nil, add)
+}
 
+// patchGraphAttendees edits the attendee list of the event at eventURL: drops every
+// address in remove (case-insensitive), then adds those in add that are not already on
+// it. Graph emails the people added and, when anyone is dropped, a cancellation to them.
+// No request is sent when nothing changes.
+func patchGraphAttendees(ctx context.Context, hc *http.Client, eventURL string, remove []string, add []calendar.Invitee) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, eventURL+"?$select=attendees", nil)
 	if err != nil {
 		return fmt.Errorf("microsoft: get attendees request: %w", err)
@@ -226,12 +249,22 @@ func (c *Client) AddAttendees(ctx context.Context, userID, calendarID, eventID s
 		return fmt.Errorf("microsoft: get attendees decode: %w", err)
 	}
 
-	seen := map[string]bool{}
-	attendees := current.Attendees
-	for _, a := range attendees {
-		seen[strings.ToLower(a.EmailAddress.Address)] = true
+	drop := map[string]bool{}
+	for _, e := range remove {
+		drop[strings.ToLower(e)] = true
 	}
-	added := false
+	seen := map[string]bool{}
+	var attendees []graphAttendee
+	changed := false
+	for _, a := range current.Attendees {
+		key := strings.ToLower(a.EmailAddress.Address)
+		if drop[key] {
+			changed = true
+			continue
+		}
+		seen[key] = true
+		attendees = append(attendees, a)
+	}
 	for _, g := range add {
 		key := strings.ToLower(g.Email)
 		if g.Email == "" || seen[key] {
@@ -242,10 +275,13 @@ func (c *Client) AddAttendees(ctx context.Context, userID, calendarID, eventID s
 		a.EmailAddress.Address = g.Email
 		a.EmailAddress.Name = g.Name
 		attendees = append(attendees, a)
-		added = true
+		changed = true
 	}
-	if !added {
+	if !changed {
 		return nil
+	}
+	if attendees == nil {
+		attendees = []graphAttendee{} // an empty list, not null: Graph rejects null
 	}
 
 	body, err := json.Marshal(map[string]any{"attendees": attendees})
@@ -280,8 +316,12 @@ func (c *Client) CancelEvent(ctx context.Context, userID, calendarID, eventID st
 	if err != nil || hc == nil {
 		return err
 	}
-	apiURL := c.apiBase + "/me/events/" + url.PathEscape(eventID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, apiURL, nil)
+	return deleteGraphEvent(ctx, hc, c.apiBase+"/me/events/"+url.PathEscape(eventID))
+}
+
+// deleteGraphEvent deletes the event at eventURL; one that is already gone is not an error.
+func deleteGraphEvent(ctx context.Context, hc *http.Client, eventURL string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, eventURL, nil)
 	if err != nil {
 		return fmt.Errorf("microsoft: cancel event request: %w", err)
 	}

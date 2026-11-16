@@ -35,7 +35,7 @@ All endpoints need auth. Times are RFC3339; the server returns UTC.
 | Method & path | Who | Body / query | Result |
 |---|---|---|---|
 | `GET /v1/users/me` | any | | adds `secretary_for: [host_id]` |
-| `GET /v1/staff/hosts` | any | | `{hosts:[{id,name,email,timezone,avatar_url,self,has_calendar,event_types:[{id,slug,name,duration_minutes,location_type,allow_conference_choice}]}]}`: the hosts the caller can manage, with their active event types |
+| `GET /v1/staff/hosts` | any | | `{hosts:[{id,name,email,timezone,avatar_url,self,has_calendar,event_types:[{id,slug,name,duration_minutes,location_type,allow_conference_choice,conference_options}]}]}`: the hosts the caller can manage, with their active event types |
 | `GET /v1/staff/calendar` | any | `from`, `to` (RFC3339, at most 62 days apart), `host_ids` (comma list; default: every manageable host), `external=1` to include calendar busy | `{bookings:[…], unavailable:[…], busy:[…], busy_errors:[…]}`, see below |
 | `POST /v1/staff/bookings` | manager of `host_id` | `{host_id,event_type_id,start_at,end_at?,name,email,timezone?,guests?:[email \| {name,email}],conference?,force?}` | `201` booking JSON; `409 {error:"conflicts",conflicts:[…]}` unless `force` |
 | `PATCH /v1/staff/bookings/{id}` | manager of the booking's primary host | `{start_at,end_at?,force?}` (`end_at` defaults to start + the current length) | `200` booking JSON; `409` conflicts unless `force` |

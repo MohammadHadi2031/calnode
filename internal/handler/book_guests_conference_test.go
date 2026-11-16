@@ -30,9 +30,14 @@ func seedGuestsConference(t *testing.T, fx guestsConferenceFixture) (*handler.Ha
 
 func setGuestsConference(t *testing.T, db *sql.DB, id string, fx guestsConferenceFixture) {
 	t.Helper()
+	// allowConf stores what migration 90006 turns the old toggle into: Meet and Teams.
+	opts := ""
+	if fx.allowConf {
+		opts = "google_meet,teams"
+	}
 	if _, err := db.Exec(`UPDATE event_types SET location_type = ?, location_value = 'https://example.com/room',
-		max_guests = ?, allow_conference_choice = ? WHERE id = ?`,
-		fx.locType, fx.maxGuests, fx.allowConf, id); err != nil {
+		max_guests = ?, conference_options = ? WHERE id = ?`,
+		fx.locType, fx.maxGuests, opts, id); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -100,9 +105,12 @@ func TestPublicEventType_guestsAndConference(t *testing.T) {
 			"Up to 1 guest. They'll receive the calendar invite."},
 		{"meet without choice", guestsConferenceFixture{"google_meet", 50, false}, false, "",
 			"Up to 50 guests. They'll receive the calendar invite."},
-		// The toggle only means something for a Meet/Teams event type: on Zoom (or any
-		// other location) it is ignored rather than offering a platform switch.
-		{"zoom ignores the toggle", guestsConferenceFixture{"zoom", 0, true}, false, "", ""},
+		// Zoom is a platform too (migration 90006): its event type offers the stored
+		// options beside itself, with Zoom preselected.
+		{"zoom offers the options", guestsConferenceFixture{"zoom", 0, true}, true, "zoom", ""},
+		// Anything that is not a platform ignores the options rather than offering a
+		// platform switch the event type never asked for.
+		{"phone ignores the options", guestsConferenceFixture{"phone", 0, true}, false, "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -183,7 +191,8 @@ func TestBookPage_conferenceChoice(t *testing.T) {
 		{"meet preselects meet", guestsConferenceFixture{"google_meet", 0, true}, true, "google_meet"},
 		{"teams preselects teams", guestsConferenceFixture{"teams", 0, true}, true, "teams"},
 		{"toggle off", guestsConferenceFixture{"teams", 0, false}, false, ""},
-		{"not a meet/teams type", guestsConferenceFixture{"zoom", 0, true}, false, ""},
+		{"zoom preselects zoom", guestsConferenceFixture{"zoom", 0, true}, true, "zoom"},
+		{"not a platform", guestsConferenceFixture{"phone", 0, true}, false, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -196,7 +205,10 @@ func TestBookPage_conferenceChoice(t *testing.T) {
 			if !tc.shown {
 				return
 			}
-			for _, v := range []string{"google_meet", "teams"} {
+			for _, v := range []string{"google_meet", "teams", "zoom"} {
+				if v == "zoom" && tc.checked != "zoom" {
+					continue // offered only when it is the event type's own location
+				}
 				radio := `value="` + v + `"`
 				i := strings.Index(body, radio)
 				if i < 0 {

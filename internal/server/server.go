@@ -208,6 +208,15 @@ func BuildHandler(ctx context.Context, cfg *config.Config, db *sql.DB, logger *s
 			calSvc.Register(mc)
 			logger.Info("Microsoft 365 calendar configured", "tenant", cfg.MicrosoftTenant)
 		}
+		// The workspace Teams account (fork): the same app registration, acting as itself.
+		if ws, err := microsoft.NewWorkspace(db, cfg.MicrosoftClientID, cfg.MicrosoftClientSecret, cfg.MicrosoftTenant); err != nil {
+			h.SetTeamsUnavailable(err.Error())
+			logger.Info("Microsoft Teams workspace account unavailable", "reason", err)
+		} else {
+			calSvc.SetWorkspace(ws)
+		}
+	} else {
+		h.SetTeamsUnavailable("Microsoft isn't configured on this server: set MICROSOFT_CLIENT_ID, MICROSOFT_CLIENT_SECRET and MICROSOFT_TENANT.")
 	}
 
 	// CalDAV (Apple iCloud / Fastmail / Nextcloud / generic): unlike Google/Microsoft it
@@ -401,6 +410,9 @@ func New(ctx context.Context, cfg *config.Config, db *sql.DB, logger *slog.Logge
 	mux.HandleFunc("PATCH /v1/settings/google", settingsRL(h.RequireAuth(h.PatchGoogleSettings)))
 	mux.HandleFunc("GET /v1/settings/zoom", h.RequireAuth(h.GetZoomSettings))
 	mux.HandleFunc("PATCH /v1/settings/zoom", settingsRL(h.RequireAuth(h.PatchZoomSettings)))
+	mux.HandleFunc("GET /v1/settings/teams", h.RequireAuth(h.GetTeamsSettings))
+	mux.HandleFunc("PATCH /v1/settings/teams", settingsRL(h.RequireAuth(h.PatchTeamsSettings)))
+	mux.HandleFunc("POST /v1/settings/teams/test", settingsRL(h.RequireAuth(h.TestTeamsSettings)))
 	mux.HandleFunc("GET /v1/settings/livekit", h.RequireAuth(h.GetLiveKitSettings))
 	mux.HandleFunc("PATCH /v1/settings/livekit", settingsRL(h.RequireAuth(h.PatchLiveKitSettings)))
 	mux.HandleFunc("GET /v1/settings/storage", h.RequireAuth(h.GetStorageSettings))

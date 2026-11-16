@@ -182,7 +182,7 @@ func TestConferenceChoice(t *testing.T) {
 	if code, msg := f.bookWith(t, `,"conference":"teams"`); code != 400 {
 		t.Fatalf("teams on an event type without the choice: %d %s; want 400", code, msg)
 	}
-	if _, err := f.h.db.Exec(`UPDATE event_types SET allow_conference_choice = 1 WHERE slug = 'intro'`); err != nil {
+	if _, err := f.h.db.Exec(`UPDATE event_types SET conference_options = 'google_meet,teams' WHERE slug = 'intro'`); err != nil {
 		t.Fatal(err)
 	}
 	code, id := f.bookWith(t, `,"conference":"teams"`)

@@ -494,8 +494,10 @@
 
 	const cHost = $derived(hosts.find((h) => h.id === cHostId));
 	const cEventType = $derived(cHost?.event_types.find((e) => e.id === cEventTypeId));
-	const isOnlineMeeting = (t: string) => t === 'google_meet' || t === 'teams';
-	const cShowConference = $derived(!!cEventType?.allow_conference_choice && isOnlineMeeting(cEventType.location_type));
+	const PLATFORM_LABELS: Record<string, string> = { google_meet: 'Google Meet', teams: 'Microsoft Teams', zoom: 'Zoom' };
+	// The platforms this event type lets the booker pick from (default included; [] = none).
+	const cConfOptions = $derived(cEventType?.conference_options ?? []);
+	const cShowConference = $derived(cConfOptions.length > 0);
 
 	/** The chosen time in the appointment's zone, the viewer's and the host's. */
 	const cZoneRows = $derived.by(() => {
@@ -562,7 +564,7 @@
 		// co-hosts silently booked them as well.
 		const et = h?.event_types.find((e) => (e.co_hosts ?? []).length === 0) ?? h?.event_types[0];
 		cEventTypeId = et?.id ?? '';
-		cConference = et && isOnlineMeeting(et.location_type) ? et.location_type : '';
+		cConference = et && (et.conference_options ?? []).length ? et.location_type : '';
 		cSync = !!h?.has_calendar;
 		applyDefaultEnd();
 	}
@@ -570,7 +572,7 @@
 	function pickEventType(id: string) {
 		cEventTypeId = id;
 		const et = cHost?.event_types.find((e) => e.id === id);
-		cConference = et && isOnlineMeeting(et.location_type) ? et.location_type : '';
+		cConference = et && (et.conference_options ?? []).length ? et.location_type : '';
 		applyDefaultEnd();
 	}
 
@@ -1240,11 +1242,12 @@
 						<Label>Conference</Label>
 						<Select.Root type="single" value={cConference} onValueChange={(v) => v && (cConference = v)}>
 							<Select.Trigger class="w-full" aria-label="Conference">
-								{cConference === 'teams' ? 'Microsoft Teams' : 'Google Meet'}
+								{PLATFORM_LABELS[cConference] ?? cConference}
 							</Select.Trigger>
 							<Select.Content>
-								<Select.Item value="google_meet" label="Google Meet">Google Meet</Select.Item>
-								<Select.Item value="teams" label="Microsoft Teams">Microsoft Teams</Select.Item>
+								{#each cConfOptions as p (p)}
+									<Select.Item value={p} label={PLATFORM_LABELS[p] ?? p}>{PLATFORM_LABELS[p] ?? p}</Select.Item>
+								{/each}
 							</Select.Content>
 						</Select.Root>
 					</div>
