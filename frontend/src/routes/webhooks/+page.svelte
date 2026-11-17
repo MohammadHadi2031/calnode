@@ -9,6 +9,10 @@
 	import { Switch } from '$lib/components/ui/switch';
 	import * as Tooltip from '$lib/components/ui/tooltip';
 	import { toast } from 'svelte-sonner';
+	import { currentUser } from '$lib/stores';
+
+	// Only an admin may send a webhook for every booking (the server enforces it too).
+	const isAdmin = $derived(($currentUser?.is_admin || $currentUser?.is_owner) ?? false);
 
 	let items: Webhook[] = $state([]);
 	let loading = $state(true);
@@ -73,8 +77,8 @@
 	];
 	const allFieldKeys = fieldGroups.flatMap((g) => g.fields.map((f) => f.key));
 
-	let form = $state<{ url: string; events: string[]; fields: string[] }>({
-		url: '', events: ['booking.created', 'booking.cancelled'], fields: [...allFieldKeys]
+	let form = $state<{ url: string; events: string[]; fields: string[]; allBookings: boolean }>({
+		url: '', events: ['booking.created', 'booking.cancelled'], fields: [...allFieldKeys], allBookings: false
 	});
 
 	// Delivery log (lazy-loaded per webhook).
@@ -106,8 +110,13 @@
 		if (form.events.length === 0) { createError = 'Select at least one event.'; return; }
 		creating = true;
 		try {
-			await api.post('/v1/webhooks', { url: form.url, events: form.events, fields: form.fields });
-			form = { url: '', events: ['booking.created', 'booking.cancelled'], fields: [...allFieldKeys] };
+			await api.post('/v1/webhooks', {
+				url: form.url,
+				events: form.events,
+				fields: form.fields,
+				scope: form.allBookings ? 'all' : 'own'
+			});
+			form = { url: '', events: ['booking.created', 'booking.cancelled'], fields: [...allFieldKeys], allBookings: false };
 			showCreate = false;
 			await load();
 		} catch (e: any) {
@@ -146,6 +155,23 @@
 			toast.error(e?.message || 'Could not update the webhook');
 		} finally {
 			toggling[wh.id] = false;
+		}
+	}
+
+	// Widen a webhook to every booking, or narrow it back to its owner's (admins only).
+	let scoping: Record<string, boolean> = $state({});
+	async function setAllBookings(wh: Webhook, on: boolean) {
+		scoping[wh.id] = true;
+		const before = wh.scope;
+		wh.scope = on ? 'all' : 'own';
+		try {
+			await api.patch(`/v1/webhooks/${wh.id}`, { scope: wh.scope });
+			toast.success(on ? 'Webhook now sends every booking, whoever hosts it' : 'Webhook now sends only your own bookings');
+		} catch (e: any) {
+			wh.scope = before;
+			toast.error(e?.message || 'Could not update the webhook');
+		} finally {
+			scoping[wh.id] = false;
 		}
 	}
 
@@ -219,6 +245,18 @@
 			/>
 		</div>
 
+		{#if isAdmin}
+			<div class="mb-4 flex items-start gap-3">
+				<Switch id="wh-all" bind:checked={form.allBookings} class="mt-0.5" />
+				<div>
+					<Label for="wh-all">Send every booking, whoever hosts it</Label>
+					<p class="mt-0.5 text-xs text-muted-foreground">
+						Off: only bookings you host. On: all hosts' bookings, e.g. for a CRM sync. Admins only.
+					</p>
+				</div>
+			</div>
+		{/if}
+
 		<div class="mb-4 space-y-2">
 			<p class="text-sm font-medium">Events to send</p>
 			{#each allEvents as ev}
@@ -272,6 +310,7 @@
 			<thead>
 				<tr class="border-b">
 					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">URL</th>
+					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Bookings</th>
 					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Events</th>
 					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Fields</th>
 					<th class="px-4 pb-3 pt-3 text-left text-xs font-medium text-muted-foreground">Status</th>
@@ -284,6 +323,32 @@
 					{#each items as wh}
 						<tr class="transition-colors hover:bg-muted/30">
 							<td class="max-w-xs overflow-hidden text-ellipsis whitespace-nowrap px-4 py-3 font-mono text-xs {wh.is_active ? '' : 'text-muted-foreground'}" title={wh.url}>{wh.url}</td>
+							<td class="px-4 py-3">
+								{#if isAdmin}
+									<Tooltip.Root>
+										<Tooltip.Trigger>
+											{#snippet child({ props })}
+												<label {...props} class="flex w-28 cursor-pointer items-center gap-2 text-xs">
+													<Switch
+														checked={wh.scope === 'all'}
+														disabled={scoping[wh.id]}
+														onCheckedChange={(v) => setAllBookings(wh, v)}
+														aria-label="Send every booking to {wh.url}"
+													/>
+													<span class={wh.scope === 'all' ? 'font-medium' : 'text-muted-foreground'}>{wh.scope === 'all' ? 'All hosts' : 'Mine'}</span>
+												</label>
+											{/snippet}
+										</Tooltip.Trigger>
+										<Tooltip.Content>
+											{wh.scope === 'all'
+												? 'Sends every booking, whoever hosts it. Turn off to send only bookings you host.'
+												: 'Sends only bookings you host. Turn on to send every host\'s bookings.'}
+										</Tooltip.Content>
+									</Tooltip.Root>
+								{:else}
+									<span class="text-xs text-muted-foreground">{wh.scope === 'all' ? 'All hosts' : 'Mine'}</span>
+								{/if}
+							</td>
 							<td class="px-4 py-3 text-xs text-muted-foreground">{(wh.events ?? []).join(', ')}</td>
 							<td class="whitespace-nowrap px-4 py-3 text-xs text-muted-foreground">{(wh.fields ?? []).length} fields</td>
 							<td class="px-4 py-3">
@@ -326,7 +391,7 @@
 						</tr>
 						{#if openDeliveries === wh.id}
 							<tr class="bg-muted/20">
-								<td colspan="6" class="px-4 py-3">
+								<td colspan="7" class="px-4 py-3">
 									{#if deliveriesLoading}
 										<p class="text-xs text-muted-foreground">Loading deliveries…</p>
 									{:else if deliveries.length === 0}

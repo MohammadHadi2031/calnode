@@ -164,6 +164,8 @@ export type Webhook = {
 	url: string;
 	events: string[];
 	fields?: string[];
+	/** 'own' = bookings its owner hosts; 'all' = every booking (admins only). */
+	scope?: 'own' | 'all';
 	is_active: boolean;
 	created_at: string;
 };

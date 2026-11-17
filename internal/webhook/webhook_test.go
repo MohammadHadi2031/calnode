@@ -421,3 +421,144 @@ func TestDecryptSecret_roundTrip(t *testing.T) {
 		t.Error("decrypted secret does not match the plain secret shown at creation")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Scope (wisegrid fork): "all" fires for every host's bookings while the owner is
+// an active admin, and each webhook fires at most once per event.
+// ---------------------------------------------------------------------------
+
+func deliveryCount(t *testing.T, e *env) int {
+	t.Helper()
+	var n int
+	if err := e.db.QueryRow(`SELECT COUNT(*) FROM webhook_deliveries`).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	return n
+}
+
+func allScopeWebhook(t *testing.T, e *env, owner string) string {
+	t.Helper()
+	ctx := context.Background()
+	wh, _, err := e.svc.Create(ctx, owner, "https://example.com/all", []string{"booking.created"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := e.svc.SetScope(ctx, owner, wh.ID, webhook.ScopeAll); err != nil {
+		t.Fatalf("SetScope: %v", err)
+	}
+	return wh.ID
+}
+
+func TestScope_defaultIsOwn(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	wh, _, _ := e.svc.Create(ctx, testUserID, "https://example.com/hook", []string{"booking.created"})
+	got, err := e.svc.Scope(ctx, testUserID, wh.ID)
+	if err != nil || got != webhook.ScopeOwn {
+		t.Fatalf("Scope = %q, %v; want own", got, err)
+	}
+	list, _ := e.svc.List(ctx, testUserID)
+	if len(list) != 1 || list[0].Scope != webhook.ScopeOwn {
+		t.Fatalf("List scope = %+v; want own", list)
+	}
+}
+
+func TestSetScope_rejectsUnknownAndOthersWebhook(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	wh, _, _ := e.svc.Create(ctx, testUserID, "https://example.com/hook", []string{"booking.created"})
+	if err := e.svc.SetScope(ctx, testUserID, wh.ID, "everyone"); err == nil {
+		t.Error("SetScope accepted an unknown scope")
+	}
+	if err := e.svc.SetScope(ctx, otherUser, wh.ID, webhook.ScopeAll); err != webhook.ErrNotFound {
+		t.Errorf("SetScope on another user's webhook = %v; want ErrNotFound", err)
+	}
+}
+
+func TestEnqueue_scopeAllFiresForOtherHostsWhenOwnerIsAdmin(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.db.Exec(`UPDATE users SET is_admin = 1 WHERE id = ?`, testUserID)
+	allScopeWebhook(t, e, testUserID)
+
+	if err := e.svc.Enqueue(ctx, "booking.created", webhook.BookingPayload{HostID: otherUser}); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if n := deliveryCount(t, e); n != 1 {
+		t.Errorf("deliveries = %d; want 1 (admin's all-scope webhook hears other hosts)", n)
+	}
+}
+
+func TestEnqueue_scopeAllStillSubscriptionFiltered(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.db.Exec(`UPDATE users SET is_admin = 1 WHERE id = ?`, testUserID)
+	allScopeWebhook(t, e, testUserID) // booking.created only
+
+	e.svc.Enqueue(ctx, "booking.cancelled", webhook.BookingPayload{HostID: otherUser})
+	if n := deliveryCount(t, e); n != 0 {
+		t.Errorf("deliveries = %d; want 0 (not subscribed to booking.cancelled)", n)
+	}
+}
+
+func TestEnqueue_scopeAllIgnoredUnlessOwnerIsActiveAdmin(t *testing.T) {
+	ctx := context.Background()
+	for name, setup := range map[string]string{
+		"member":         `UPDATE users SET is_admin = 0, is_owner = 0 WHERE id = ?`,
+		"archived admin": `UPDATE users SET is_admin = 1, archived_at = '2026-01-01T00:00:00Z' WHERE id = ?`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t)
+			allScopeWebhook(t, e, testUserID)
+			if _, err := e.db.Exec(setup, testUserID); err != nil {
+				t.Fatalf("setup: %v", err)
+			}
+			e.svc.Enqueue(ctx, "booking.created", webhook.BookingPayload{HostID: otherUser})
+			if n := deliveryCount(t, e); n != 0 {
+				t.Errorf("deliveries = %d; want 0", n)
+			}
+			// Its own bookings still reach it, as for any webhook.
+			e.svc.Enqueue(ctx, "booking.created", webhook.BookingPayload{HostID: testUserID})
+			if n := deliveryCount(t, e); n != 1 {
+				t.Errorf("deliveries for own booking = %d; want 1", n)
+			}
+		})
+	}
+}
+
+func TestEnqueue_ownerIsOwnerCountsAsAdmin(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.db.Exec(`UPDATE users SET is_owner = 1, is_admin = 0 WHERE id = ?`, testUserID)
+	allScopeWebhook(t, e, testUserID)
+	e.svc.Enqueue(ctx, "booking.created", webhook.BookingPayload{HostID: otherUser})
+	if n := deliveryCount(t, e); n != 1 {
+		t.Errorf("deliveries = %d; want 1", n)
+	}
+}
+
+// The admin hosts the booking AND is passed as an extra recipient AND the webhook is
+// workspace-wide: still one delivery.
+func TestEnqueue_firesOncePerWebhookWhateverMatches(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.db.Exec(`UPDATE users SET is_admin = 1 WHERE id = ?`, testUserID)
+	allScopeWebhook(t, e, testUserID)
+
+	e.svc.Enqueue(ctx, "booking.created", webhook.BookingPayload{HostID: testUserID}, testUserID, testUserID)
+	if n := deliveryCount(t, e); n != 1 {
+		t.Errorf("deliveries = %d; want 1", n)
+	}
+}
+
+// Extra recipients (the owners on booking.email_failed) get their own-scope webhooks.
+func TestEnqueue_alsoUserIDsReachTheirOwnWebhooks(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.svc.Create(ctx, otherUser, "https://example.com/owner", []string{"booking.email_failed"})
+
+	e.svc.Enqueue(ctx, "booking.email_failed", webhook.BookingPayload{HostID: testUserID}, otherUser)
+	if n := deliveryCount(t, e); n != 1 {
+		t.Errorf("deliveries = %d; want 1", n)
+	}
+}

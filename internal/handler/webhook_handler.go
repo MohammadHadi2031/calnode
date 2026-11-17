@@ -28,9 +28,17 @@ func (h *Handler) CreateWebhook(w http.ResponseWriter, r *http.Request) {
 		URL    string   `json:"url"`
 		Events []string `json:"events"`
 		Fields []string `json:"fields"` // optional payload field selection; nil = default set
+		Scope  string   `json:"scope"`  // optional; "" = own
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if req.Scope == "" {
+		req.Scope = webhook.ScopeOwn
+	}
+	if msg := checkWebhookScope(user, req.Scope, webhook.ScopeOwn); msg != "" {
+		h.writeError(w, http.StatusBadRequest, msg)
 		return
 	}
 	if req.URL == "" {
@@ -72,12 +80,20 @@ func (h *Handler) CreateWebhook(w http.ResponseWriter, r *http.Request) {
 			wh.Fields = webhook.ValidFields(req.Fields)
 		}
 	}
+	if req.Scope != webhook.ScopeOwn {
+		if err := h.webhookSvc.SetScope(r.Context(), user.ID, wh.ID, req.Scope); err != nil {
+			h.logger.ErrorContext(r.Context(), "create webhook: set scope", "error", err)
+		} else {
+			wh.Scope = req.Scope
+		}
+	}
 
 	h.writeJSON(w, http.StatusCreated, map[string]any{
 		"id":         wh.ID,
 		"url":        wh.URL,
 		"events":     wh.Events,
 		"fields":     wh.Fields,
+		"scope":      wh.Scope,
 		"secret":     secret,
 		"is_active":  wh.IsActive,
 		"created_at": wh.CreatedAt.UTC().Format(time.RFC3339),
@@ -94,11 +110,31 @@ func (h *Handler) PatchWebhook(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Events   *[]string `json:"events"`
 		Fields   *[]string `json:"fields"`
+		Scope    *string   `json:"scope"`
 		IsActive *bool     `json:"is_active"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		h.writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
+	}
+	if req.Scope != nil {
+		stored, err := h.webhookSvc.Scope(r.Context(), user.ID, id)
+		if errors.Is(err, webhook.ErrNotFound) {
+			h.writeError(w, http.StatusNotFound, "webhook not found")
+			return
+		}
+		if err != nil {
+			h.logger.ErrorContext(r.Context(), "update webhook: read scope", "error", err)
+			h.writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		if msg := checkWebhookScope(user, *req.Scope, stored); msg != "" {
+			h.writeError(w, http.StatusBadRequest, msg)
+			return
+		}
+		if *req.Scope == stored {
+			req.Scope = nil // unchanged: nothing to write
+		}
 	}
 	if req.Events != nil {
 		if len(*req.Events) == 0 {
@@ -121,7 +157,35 @@ func (h *Handler) PatchWebhook(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
+	if req.Scope != nil {
+		if err := h.webhookSvc.SetScope(r.Context(), user.ID, id, *req.Scope); err != nil {
+			if errors.Is(err, webhook.ErrNotFound) {
+				h.writeError(w, http.StatusNotFound, "webhook not found")
+				return
+			}
+			h.logger.ErrorContext(r.Context(), "update webhook: set scope", "error", err)
+			h.writeError(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// checkWebhookScope returns why scope cannot be saved over stored, or "" if it can.
+//
+// Only an admin may widen a webhook to every booking: its payload can carry other
+// hosts' attendees' names, emails and intake answers. The check applies on change, not
+// on mention, so a webhook left at "all" by an admin who was later demoted can still be
+// paused or edited by its owner. It just stops firing for other hosts' bookings (Enqueue
+// re-checks the role), and narrowing it back to "own" is always allowed.
+func checkWebhookScope(user AuthUser, scope, stored string) string {
+	if !webhook.ValidScope(scope) {
+		return `scope must be "own" or "all"`
+	}
+	if scope == webhook.ScopeAll && stored != webhook.ScopeAll && !user.IsAdmin && !user.IsOwner {
+		return "only an admin can send a webhook for every booking"
+	}
+	return ""
 }
 
 func (h *Handler) ListWebhooks(w http.ResponseWriter, r *http.Request) {
@@ -141,6 +205,7 @@ func (h *Handler) ListWebhooks(w http.ResponseWriter, r *http.Request) {
 			"url":        wh.URL,
 			"events":     wh.Events,
 			"fields":     wh.Fields,
+			"scope":      wh.Scope,
 			"is_active":  wh.IsActive,
 			"created_at": wh.CreatedAt.UTC().Format(time.RFC3339),
 		}

@@ -22,12 +22,28 @@ import (
 
 var ErrNotFound = errors.New("webhook: not found")
 
+// Scopes: which bookings a webhook fires for.
+//
+// ScopeOwn is the historical behaviour: the bookings its owner hosts. ScopeAll is every
+// booking in the workspace, whoever hosts it, and only takes effect while the owner is
+// an admin or owner. Enqueue checks that at enqueue time rather than trusting the stored
+// value, so demoting or archiving the owner stops it without anyone having to find and
+// edit the webhook. The handler refuses to set it for a non-admin.
+const (
+	ScopeOwn = "own"
+	ScopeAll = "all"
+)
+
+// ValidScope reports whether s is a known scope.
+func ValidScope(s string) bool { return s == ScopeOwn || s == ScopeAll }
+
 type Webhook struct {
 	ID        string
 	UserID    string
 	URL       string
 	Events    []string
 	Fields    []string // payload field keys; nil means the default set
+	Scope     string   // ScopeOwn or ScopeAll
 	IsActive  bool
 	CreatedAt time.Time
 }
@@ -202,10 +218,42 @@ func (s *Service) Create(ctx context.Context, userID, url string, events []strin
 		UserID:    userID,
 		URL:       url,
 		Events:    events,
+		Scope:     ScopeOwn,
 		IsActive:  true,
 		CreatedAt: time.Now().UTC(),
 	}
 	return wh, plainSecret, nil
+}
+
+// Scope returns the stored scope of a webhook owned by userID.
+func (s *Service) Scope(ctx context.Context, userID, id string) (string, error) {
+	var scope string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT scope FROM webhooks WHERE id = ? AND user_id = ?`, id, userID).Scan(&scope)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", fmt.Errorf("webhook: scope: %w", err)
+	}
+	return scope, nil
+}
+
+// SetScope changes which bookings a webhook owned by userID fires for. Whether the
+// owner may set ScopeAll is the caller's decision (see the ScopeAll comment).
+func (s *Service) SetScope(ctx context.Context, userID, id, scope string) error {
+	if !ValidScope(scope) {
+		return fmt.Errorf("webhook: unknown scope %q", scope)
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE webhooks SET scope = ? WHERE id = ? AND user_id = ?`, scope, id, userID)
+	if err != nil {
+		return fmt.Errorf("webhook: set scope: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // Update applies partial changes to a webhook owned by userID. Nil pointers are
@@ -253,7 +301,7 @@ func (s *Service) Update(ctx context.Context, userID, id string, events, fields 
 // List returns all webhooks for a user, most recent first.
 func (s *Service) List(ctx context.Context, userID string) ([]Webhook, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, url, events, fields, is_active, created_at
+		SELECT id, url, events, fields, scope, is_active, created_at
 		FROM webhooks WHERE user_id = ? ORDER BY created_at DESC`, userID)
 	if err != nil {
 		return nil, fmt.Errorf("webhook: list: %w", err)
@@ -267,7 +315,7 @@ func (s *Service) List(ctx context.Context, userID string) ([]Webhook, error) {
 		var fieldsJSON sql.NullString
 		var isActive int
 		var createdAt string
-		if err := rows.Scan(&wh.ID, &wh.URL, &eventsJSON, &fieldsJSON, &isActive, &createdAt); err != nil {
+		if err := rows.Scan(&wh.ID, &wh.URL, &eventsJSON, &fieldsJSON, &wh.Scope, &isActive, &createdAt); err != nil {
 			return nil, fmt.Errorf("webhook: scan: %w", err)
 		}
 		wh.UserID = userID
@@ -394,19 +442,38 @@ func buildData(bd enrichedBooking, fields []string) map[string]any {
 	return out
 }
 
-// Enqueue finds all active webhooks for p.HostID that subscribe to event,
-// and creates a webhook_deliveries + jobs row pair for each. Failures are
+// Enqueue finds the active webhooks subscribed to event that should hear about this
+// booking, and creates a webhook_deliveries + jobs row pair for each. Failures are
 // soft-errors (caller logs; a booking is already committed).
-func (s *Service) Enqueue(ctx context.Context, event string, p BookingPayload) error {
-	return s.EnqueueFor(ctx, p.HostID, event, p)
-}
-
-// EnqueueFor is Enqueue for the webhooks of userID rather than of p.HostID, for events
-// someone other than the host must hear about (an undelivered email reaches the owner).
-func (s *Service) EnqueueFor(ctx context.Context, userID, event string, p BookingPayload) error {
+//
+// A webhook matches when its owner is p.HostID or one of alsoUserIDs (someone other
+// than the host who must hear about the event: an undelivered email reaches the
+// workspace owners), or when it is a ScopeAll webhook whose owner is still an active
+// admin. Matching is one query over the webhooks, so each webhook fires at most once
+// per event however many of those reasons apply to it.
+func (s *Service) Enqueue(ctx context.Context, event string, p BookingPayload, alsoUserIDs ...string) error {
+	owners := make([]any, 0, 1+len(alsoUserIDs))
+	if p.HostID != "" {
+		owners = append(owners, p.HostID)
+	}
+	for _, id := range alsoUserIDs {
+		if id != "" {
+			owners = append(owners, id)
+		}
+	}
+	ownerMatch := "0"
+	if len(owners) > 0 {
+		ownerMatch = "w.user_id IN (?" + strings.Repeat(", ?", len(owners)-1) + ")"
+	}
+	args := append(owners, ScopeAll)
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, events, fields FROM webhooks
-		WHERE user_id = ? AND is_active = 1`, userID)
+		SELECT w.id, w.events, w.fields
+		FROM webhooks w
+		JOIN users u ON u.id = w.user_id
+		WHERE w.is_active = 1
+		  AND (`+ownerMatch+`
+		       OR (w.scope = ? AND (u.is_admin = 1 OR u.is_owner = 1) AND u.archived_at IS NULL))`, // #nosec G202 -- ownerMatch is built from "?" placeholders only; every value is bound via args
+		args...)
 	if err != nil {
 		return fmt.Errorf("webhook: list for enqueue: %w", err)
 	}

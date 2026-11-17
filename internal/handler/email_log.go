@@ -170,16 +170,14 @@ func (h *Handler) JobEmailAlert(ctx context.Context, payload string) error {
 			EmailError:     errText,
 			EmailRecipient: p.Recipient,
 		}
-		if err := h.webhookSvc.Enqueue(ctx, "booking.email_failed", wp); err != nil {
-			h.logger.Error("email alert: enqueue host webhook", "error", err, "booking_id", b.ID)
+		// The host's webhooks and every owner's, in one pass so a webhook that matches on
+		// more than one count (an owner hosting it, a workspace-wide webhook) fires once.
+		ownerIDs := make([]string, len(owners))
+		for i, o := range owners {
+			ownerIDs[i] = o.ID
 		}
-		for _, o := range owners {
-			if o.ID == b.HostID {
-				continue // already covered by the host's own webhooks
-			}
-			if err := h.webhookSvc.EnqueueFor(ctx, o.ID, "booking.email_failed", wp); err != nil {
-				h.logger.Error("email alert: enqueue owner webhook", "error", err, "booking_id", b.ID)
-			}
+		if err := h.webhookSvc.Enqueue(ctx, "booking.email_failed", wp, ownerIDs...); err != nil {
+			h.logger.Error("email alert: enqueue webhooks", "error", err, "booking_id", b.ID)
 		}
 	}
 

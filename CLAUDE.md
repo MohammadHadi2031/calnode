@@ -246,6 +246,17 @@ at an unconditional `"zoom"`.
   `allow_conference_choice` is derived/kept in step, not read. Adding an option validates on
   change only (`validateConferenceOptions`).
 
+## Webhooks fire for the booking's host, unless scoped to all (fork)
+
+A webhook with `scope = 'own'` (the default) fires only for bookings its owner **hosts**.
+A CRM sync registered under one admin's account therefore heard nothing for six weeks in
+production, because other people host every booking - no error, no delivery rows. An
+admin can set `scope = 'all'` (migration 90007) to receive every booking; `Enqueue`
+re-checks the owner is still an active admin/owner each time, so demotion stops it.
+Matching is one query, so a webhook fires at most once per event however it matches -
+keep it that way rather than adding a second `Enqueue` call for another audience (pass
+the extra user ids instead, as `booking.email_failed` does for the owners).
+
 ## Conventions
 
 - `pnpm` (not npm). Use `pnpm exec <tool>` for local binaries.
