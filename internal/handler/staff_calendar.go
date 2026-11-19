@@ -157,7 +157,12 @@ func (h *Handler) staffConflicts(ctx context.Context, eventTypeID string, hostID
 		switch v := verdicts[i]; {
 		case v.err != nil:
 			h.logger.WarnContext(ctx, "staff calendar: free/busy check", "host", id, "error", v.err)
-			out = append(out, staffConflict{HostID: id, HostName: names[id], Kind: "calendar_unchecked", Detail: "their calendar could not be checked"})
+			// Say which of the two it is: one needs the host to act, the other only a retry.
+			detail := "their calendar couldn't be reached; try again in a moment"
+			if calendar.IsReauthErr(v.err) {
+				detail = "their calendar connection has expired; they need to reconnect it in Calnode"
+			}
+			out = append(out, staffConflict{HostID: id, HostName: names[id], Kind: "calendar_unchecked", Detail: detail})
 		case !v.free:
 			out = append(out, staffConflict{HostID: id, HostName: names[id], Kind: "calendar", Detail: "busy on their calendar"})
 		}

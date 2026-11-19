@@ -4,10 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"sync"
 	"time"
 
+	"golang.org/x/oauth2"
+
+	"github.com/calnode/calnode/internal/calendar"
 	"github.com/calnode/calnode/internal/slots"
 )
 
@@ -123,13 +127,52 @@ func (h *Handler) calendarFreeAt(ctx context.Context, gc calendarFreeBusy, userI
 		}
 		return false, fmt.Errorf("load own calendar events: %w", err)
 	}
-	busy, err := gc.FreeBusy(ctx, userID, window.Start, window.End)
+	busy, err := h.freeBusyRetried(ctx, gc, userID, window.Start, window.End)
 	if err != nil {
 		return false, fmt.Errorf("%w: %w", errCalendarUnavailable, err)
 	}
 	busy = slots.SubtractIntervals(busy, ownEvents)
 	remaining := slots.SubtractIntervals([]slots.Interval{window}, busy)
 	return len(remaining) == 1 && remaining[0] == window, nil
+}
+
+// freeBusyRetried is gc.FreeBusy with one retry, so a single stalled request to the
+// provider does not refuse a booking. In production a Google token refresh hung until the
+// whole check's deadline, blocking a staff booking on a co-host's calendar that was fine
+// a moment later.
+//
+// The first try gets half of ctx's remaining time, leaving the retry the rest, so the
+// worst case is still the caller's deadline. A revoked or expired grant is not retried:
+// the remedy is reconnecting the account, and asking again gets the same answer.
+//
+// The retry runs on its own connection pool, passed the way golang.org/x/oauth2 reads it
+// (the oauth2.HTTPClient context value, which the Google and Microsoft providers' token
+// refresh and API calls both use). A cancelled HTTP/2 request leaves its connection in
+// the shared pool, so without this the retry could be sent down the connection that
+// just stalled.
+func (h *Handler) freeBusyRetried(ctx context.Context, gc calendarFreeBusy, userID string, from, to time.Time) ([]slots.Interval, error) {
+	first, cancel := ctx, context.CancelFunc(func() {})
+	if deadline, ok := ctx.Deadline(); ok {
+		first, cancel = context.WithDeadline(ctx, time.Now().Add(time.Until(deadline)/2))
+	}
+	busy, err := gc.FreeBusy(first, userID, from, to)
+	cancel()
+	if err == nil || ctx.Err() != nil || calendar.IsReauthErr(err) {
+		return busy, err
+	}
+	h.logger.WarnContext(ctx, "calendar check: retrying free/busy", "host", userID, "error", err)
+	retry := ctx
+	if ctx.Value(oauth2.HTTPClient) == nil {
+		var t *http.Transport
+		if base, ok := http.DefaultTransport.(*http.Transport); ok {
+			t = base.Clone()
+		} else {
+			t = &http.Transport{Proxy: http.ProxyFromEnvironment}
+		}
+		defer t.CloseIdleConnections()
+		retry = context.WithValue(ctx, oauth2.HTTPClient, &http.Client{Transport: t})
+	}
+	return gc.FreeBusy(retry, userID, from, to)
 }
 
 // calendarFreeBusy is the slice of *calendar.Service the booking-time check uses.
