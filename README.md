@@ -255,6 +255,23 @@ yourself), an adversarial LLM prompt-pack for your own coding agent, and
 claim we make to exactly how to check it in the source. Not a certification — a
 due-diligence accelerator.
 
+### Regular audits with ponytail
+
+Beyond the one-off check above, run a whole-repo audit regularly: before each release,
+after a large merge (e.g. pulling upstream into a fork), or about once a month. We use the
+[ponytail](https://github.com/DietrichGebert/ponytail) Claude Code plugin's audit skill:
+
+```
+/ponytail:ponytail-audit
+```
+
+It reports bugs, security holes, what breaks under the expected load, risky code with no
+test, and code that can be deleted, ranked and numbered so you can say "fix 2 and 5". It
+changes no code. Save each report as `audit-result-<YYYYMMDD-HHMMSS>.md` in the repo root.
+These files are git-ignored, so findings, which may describe open security issues, stay on
+your machine until they're fixed. Before starting a new audit, check the previous report so
+open findings aren't lost.
+
 ---
 
 ## Commercial support
